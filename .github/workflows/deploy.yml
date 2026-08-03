@@ -1,0 +1,82 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-todari-ops
+  cancel-in-progress: false
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  deploy:
+    needs: typecheck
+    runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Rsync source to host
+        run: |
+          rsync -avz --delete \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            --exclude='.env.production' \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='data' \
+            -e "ssh -i ~/.ssh/id_deploy" \
+            ./ "$EC2_HOST:~/todari-ops/"
+
+      - name: Build and restart containers
+        run: |
+          ssh -i ~/.ssh/id_deploy "$EC2_HOST" \
+            'cd ~/todari-ops && docker compose --env-file .env.production up -d --build'
+
+  notify:
+    needs: [typecheck, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Discord (deploy result)
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+          TC: ${{ needs.typecheck.result }}
+          DP: ${{ needs.deploy.result }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "no webhook secret; skip"; exit 0; }
+          RUN="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "$DP" = "success" ]; then
+            MSG="✅ todari-ops 배포 성공 (\`${GITHUB_SHA:0:7}\`)"
+          elif [ "$TC" != "success" ]; then
+            MSG="🔴 todari-ops 배포 실패 — typecheck ($TC). $RUN"
+          else
+            MSG="🔴 todari-ops 배포 실패 — deploy ($DP). $RUN"
+          fi
+          curl -sS -H "Content-Type: application/json" \
+            -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$WEBHOOK" >/dev/null || true

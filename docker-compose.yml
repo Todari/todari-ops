@@ -1,0 +1,78 @@
+# Todari consolidated infra. Designed to grow:
+# - bot (todari-ops, this repo) — Stage 1
+# - postgres (audit_log, sessions, RAG vectors) — Stage 3
+# - todari.dev or other services — opportunistic
+#
+# All services share the same Docker network and volume layout under /data.
+# Reverse proxy (caddy/traefik) only needed if any service exposes HTTPS;
+# the bot itself is outbound-only (Discord gateway).
+
+services:
+  bot:
+    container_name: todari-ops-bot
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      - WORK_DIR=/data/work
+      - NODE_ENV=production
+      # 일본어 학습 push 채널 (#일본어). 비밀 아님(서버 멤버에게 공개되는 채널 ID)이라
+      # .env.production(EC2 전용, rsync 제외) 대신 여기 두어 배포로 함께 반영한다.
+      - JP_CHANNEL_ID=1530151026974527569
+      # 자연어 대화 채널(#토다리) — 여기 메시지는 의도 분류→라우팅
+      - NL_CHANNEL_ID=1531185484985008128
+    volumes:
+      - bot_workdata:/data
+      # SDK conversation state (~/.claude) — without this, session `resume`
+      # breaks on every rebuild even though session meta survives in
+      # /data/work/sessions.json.
+      - bot_claude_state:/home/node/.claude
+    # Host nginx (already on this consolidated EC2 with certbot for
+    # api.metronomdeul.site and api.haengdong.pro) reverse-proxies
+    # ops.example.com → 127.0.0.1:3100 → bot's webhook server.
+    ports:
+      - "127.0.0.1:3100:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Stage 3: enable when migrating from in-memory + audit.log file
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: todari-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: todari
+  #     POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+  #     POSTGRES_DB: todari
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #   secrets:
+  #     - pg_password
+
+  # Caddy stub kept commented for reference. This consolidated EC2 already
+  # runs host-level nginx + certbot (sites-enabled/{metronomdeul,haengdong}),
+  # so the public bot hostname is added there instead — see README.
+  # caddy:
+  #   profiles: [https]
+  #   image: caddy:2-alpine
+  #   ...
+
+volumes:
+  bot_workdata:
+  bot_claude_state:
+  # pgdata:
+
+# secrets:
+#   pg_password:
+#     file: ./deploy/secrets/pg_password.txt

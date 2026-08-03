@@ -1,0 +1,50 @@
+{
+  "name": "todari-ops",
+  "version": "0.1.0",
+  "description": "Discord operations bot for AI coding sessions, deployment alerts, uptime monitoring, and human approval gates",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Todari/todari-ops.git"
+  },
+  "homepage": "https://github.com/Todari/todari-ops#readme",
+  "bugs": {
+    "url": "https://github.com/Todari/todari-ops/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "claude-code",
+    "discord-bot",
+    "devops",
+    "monitoring",
+    "typescript"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/bot.ts",
+    "build": "tsc -p .",
+    "start": "node dist/bot.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:init": "psql \"$AUDIT_DB_URL\" -f src/storage/schema.sql"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.15.1",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.2.119",
+    "@sentry/node": "^10.50.0",
+    "discord.js": "^14.16.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,0 +1,7 @@
+# Build-script approvals. pnpm 11 reads allowBuilds; onlyBuiltDependencies
+# kept for pnpm 10 compatibility. Without this, install hard-fails with
+# ERR_PNPM_IGNORED_BUILDS (esbuild comes in via tsx).
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild
