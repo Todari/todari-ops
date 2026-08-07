@@ -6,8 +6,8 @@ import { shouldDrop } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
 
-// Vercel account/team-level webhook. Alerts on deployment.error /
-// deployment.canceled; posts a green "recovered" note on the first successful
+// Vercel account/team-level webhook. Alerts on deployment.error;
+// posts a green "recovered" note on the first successful
 // deployment after a failure of the same project.
 
 interface VercelPayload {
@@ -39,7 +39,10 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
   const commitMsg = p.payload?.deployment?.meta?.githubCommitMessage?.split("\n")[0];
   const branch = p.payload?.deployment?.meta?.githubCommitRef;
 
-  const failed = type === "deployment.error" || type === "deployment.canceled";
+  // deployment.canceled는 실패가 아니다 — Ignored Build Step이 건너뛴 브랜치(output/cards의
+  // 스네이크·카드 자동 푸시)와 새 커밋에 밀려 취소된 빌드가 이 이벤트로 도착한다.
+  // 실제 빌드 실패는 deployment.error로만 온다.
+  const failed = type === "deployment.error";
   const succeeded = type === "deployment.succeeded";
   if (!failed && !succeeded) return;
   // Preview 배포는 실패만 알림, 성공은 프로덕션 복구 알림에만 사용.
