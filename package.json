@@ -1,7 +1,7 @@
 {
   "name": "todari-ops",
   "version": "0.1.0",
-  "description": "Discord operations bot for AI coding sessions, deployment alerts, uptime monitoring, and human approval gates",
+  "description": "Discord personal operations assistant for AI coding, Obsidian capture, deployment alerts, and service monitoring",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -19,6 +19,8 @@
     "discord-bot",
     "devops",
     "monitoring",
+    "obsidian",
+    "personal-assistant",
     "typescript"
   ],
   "scripts": {

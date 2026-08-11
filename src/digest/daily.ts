@@ -77,7 +77,7 @@ export async function postDigest(): Promise<boolean> {
     embed.addFields({ name: "🎯 오늘 첫 작업 (어제 체크인)", value: truncate(firstTask, 1000) });
   }
 
-  // --- vault sections (pushed by Mac cron; may be absent/stale) ---
+  // --- vault snapshot (Mac cron + bot-side task mutations; may be absent/stale) ---
   const vault = getVaultState();
   const isMondayKst = new Date(Date.now() + 9 * 3600_000).getUTCDay() === 1;
   if (vault && isMondayKst) {
@@ -212,6 +212,7 @@ function buildTaskButtons(vault: VaultState): Array<ActionRowBuilder<ButtonBuild
       {
         projectSlug: c.slug,
         threadName: `task/${c.slug}/${truncate(c.text, 40)}`,
+        sourceTask: { projectSlug: c.slug, note: c.note, text: c.text },
         prompt: [
           "[볼트 태스크]",
           `프로젝트: ${project.name} (${c.slug})`,
@@ -219,7 +220,8 @@ function buildTaskButtons(vault: VaultState): Array<ActionRowBuilder<ButtonBuild
           "",
           `볼트 노트 프로젝트/${c.note}.md 의 '다음 할 일' 항목이다. 이 작업을 진행해줘.`,
           "범위를 파악하고 필요하면 계획을 세운 뒤 구현·검증까지. 완료하면 마지막에",
-          "무엇을 했는지 3줄로 요약해줘 (볼트 체크는 사람이 한다).",
+          "무엇을 했는지 3줄로 요약해줘. 실제 작업과 검증을 마친 뒤 /end하면",
+          "연결된 볼트 체크박스도 자동으로 완료 처리된다.",
         ].join("\n"),
       },
       TASK_BUTTON_TTL_MS,

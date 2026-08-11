@@ -6,7 +6,6 @@ import {
   type Message,
 } from "discord.js";
 import { askText, extractJson } from "../llm.js";
-import { fetchInboxChannel } from "../discord/alerts.js";
 import { answerQuestion, correctSentence } from "../jp/tutor.js";
 import { dueCards, insertMistake } from "../jp/cards.js";
 import { askCodebase } from "../agent/ask-codebase.js";
@@ -27,6 +26,7 @@ import {
   vaultAgeHours,
 } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
+import { captureOutcomeText, captureToVault } from "../vault/capture.js";
 
 // #토다리의 자연어 메시지를 최근 대화와 함께 분류하고, 허용된 내부 기능을
 // 직접 호출한다. 코드 변경은 이 채널에서 실행하지 않고 기존 /code 와 같은
@@ -204,17 +204,6 @@ async function fetchRecentConversation(
   }
 }
 
-async function queueCapture(
-  kind: "note" | "task" | "idea",
-  project: string | undefined,
-  text: string,
-): Promise<boolean> {
-  const channel = await fetchInboxChannel();
-  if (!channel) return false;
-  await channel.send(`📥 [${kind}]${project ? ` (${project})` : ""} ${text}`);
-  return true;
-}
-
 // 전용 채널의 소유자 메시지를 처리한다. 봇 자신·다른 사용자·스레드는 호출 전에 걸러진다.
 export async function handleNaturalMessage(message: Message): Promise<void> {
   const content = message.content.trim();
@@ -230,18 +219,15 @@ export async function handleNaturalMessage(message: Message): Promise<void> {
       case "idea": {
         const body = classified.text || content;
         const project = resolveProjectSlug(classified.project);
-        const ok = await queueCapture(classified.intent, project, body);
         const label =
           classified.intent === "idea"
             ? "아이디어"
             : classified.intent === "task"
               ? "할 일"
               : "메모";
-        await message.reply(
-          ok
-            ? `📥 ${label}로 담았어요${project ? ` (${project})` : ""} — 다음 스윕 때 볼트에 반영됩니다.`
-            : "⚠️ 인박스 채널을 못 찾았어요.",
-        );
+        const ack = await message.reply(`✍️ ${label}을 볼트에 반영하고 있어요…`);
+        const outcome = await captureToVault(classified.intent, project, body);
+        await ack.edit(captureOutcomeText(outcome, label, project).slice(0, 1900));
         return;
       }
       case "jp_ask": {

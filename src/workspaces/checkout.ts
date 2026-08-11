@@ -42,8 +42,8 @@ export function githubAuthEnv(token = env.GITHUB_TOKEN): NodeJS.ProcessEnv {
 }
 
 // 이미 clone된 checkout을 원격 최신으로 fast-forward한다. 볼트처럼 계속 바뀌는
-// 레포를 매 질문마다 최신 상태로 읽기 위해 쓴다. ff-only라 로컬에 갈라진 변경이
-// 있으면 실패하지만, 봇은 읽기 전용이라 그런 일은 없다.
+// 레포를 매 작업 전 최신 상태로 맞추기 위해 쓴다. ff-only라 로컬 커밋이 갈라지면
+// 실패하며, 볼트 mutation layer는 그 경우 전용 캐시를 폐기하고 다시 clone한다.
 export async function pullLatest(dir: string): Promise<void> {
   await runGit(
     ["-C", dir, "pull", "--ff-only", "--quiet"],

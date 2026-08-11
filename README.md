@@ -24,6 +24,10 @@ Discord 명령/메시지
         │                         │
         │                    사람 승인 게이트
         │
+        ├── task·idea ────── 규칙 기반 Obsidian 편집 ── commit/push
+        ├── note ─────────── 제한된 볼트 편집 에이전트 ─┘
+        │                         └── 실패 시 Discord 안전 큐
+        │
         ├── GitHub · Sentry · Vercel webhook ── 진단/알림
         └── uptime · 도메인 · TLS · 일정 ────── digest
 ```
@@ -36,7 +40,11 @@ Discord 명령/메시지
 - GitHub, Sentry, Vercel webhook을 HMAC으로 검증하고 배포·오류 이벤트를 알립니다.
 - 서비스 uptime, 도메인 등록 만료, TLS 인증서 만료를 주기적으로 확인합니다.
 - 일간 digest, 주간 요약, 리마인더, 저녁 check-in을 Discord에 게시합니다.
-- 선택적으로 Obsidian 지식 저장소를 읽고 할 일·일정·세션 회고 흐름을 연결합니다.
+- `/task`, `/idea`는 Obsidian 볼트에 즉시 커밋하고 `/note`는 관련 문서를 찾아 제한된
+  범위에서 바로 편집합니다. 충돌하면 Discord 인박스가 안전 큐 역할을 합니다.
+- digest의 할 일에서 코딩 세션을 시작하고, 검증 후 `/end`하면 원본 볼트 체크박스도
+  자동으로 완료합니다.
+- Obsidian 할 일·일정, 세션 회고와 일간·주간 브리핑을 연결합니다.
 - 세션 메타데이터와 Claude 대화 상태를 볼륨에 보존해 재배포 뒤에도 이어갑니다.
 
 ## 안전 설계
@@ -45,6 +53,10 @@ Discord 명령/메시지
 - 허용 목록에 없는 쓰기 도구는 자동으로 거부하고, 승인 요청은 60초 후 만료됩니다.
 - GitHub 토큰은 clone URL이나 저장소 remote에 넣지 않고 프로세스 단위 인증 헤더로만
   전달합니다.
+- 자연어 볼트 편집은 Markdown 최대 3개·변경 200줄로 제한하며 삭제, 첨부파일,
+  `.obsidian` 변경을 거부합니다.
+- 볼트 쓰기는 한 번에 하나씩 실행하고, push 충돌은 한 번 rebase 재시도한 뒤 안전 큐로
+  전환합니다. 실패한 전용 checkout은 폐기해 미전송 커밋이 다음 요청에 섞이지 않게 합니다.
 - webhook secret이 없으면 해당 endpoint를 비활성화합니다.
 - `.env`, `.env.production`, `data/`, 배포 비밀 파일은 Git에서 제외됩니다.
 - 민감한 문제는 공개 Issue 대신 [보안 정책](SECURITY.md)에 따라 제보해 주세요.
@@ -93,12 +105,12 @@ pnpm dev
 
 | 변수 | 기본값 | 용도 |
 | --- | --- | --- |
-| `GITHUB_TOKEN` | 빈 값 | private repository clone 및 GitHub 연동 |
+| `GITHUB_TOKEN` | 빈 값 | private repository clone 및 볼트 Contents 쓰기 |
 | `WORK_DIR` | `./data/work` | thread별 checkout과 세션 상태 위치 |
 | `ACTION_ALLOWLIST` | `Edit,Write,Bash` | Discord에서 승인 가능한 도구 |
 | `ALERTS_CHANNEL_ID` | 빈 값 | 운영 알림 채널 |
 | `BOT_PUBLIC_HOST` | Todari 운영 host | 봇 자체 domain/TLS 감시 대상 |
-| `VAULT_REPO_URL` | Todari vault repository | 선택적 지식 저장소 |
+| `VAULT_REPO_URL` | Todari vault repository | 읽기·즉시 기록에 사용할 private Obsidian 저장소 |
 | `WEBHOOK_ENABLED` | `true` | HTTP webhook server 활성화 |
 
 ## 프로젝트 카탈로그 바꾸기
@@ -116,7 +128,9 @@ pnpm dev
 }
 ```
 
-private repository는 `GITHUB_TOKEN`에 해당 저장소의 Contents 읽기 권한을 부여해야 합니다.
+private 코드 저장소만 쓰면 `GITHUB_TOKEN`에 Contents 읽기 권한이면 충분합니다. 볼트 즉시
+기록을 쓰려면 `VAULT_REPO_URL` 저장소에는 Contents 읽기·쓰기 권한이 필요합니다. Mac의
+Obsidian Git도 주기적인 pull/push와 `pull before push`를 켜 두어 양쪽 변경을 받아야 합니다.
 패키지의 `private: true`는 GitHub 공개 범위와 무관하며, 실수로 npm에 배포되는 것을 막기 위한
 설정입니다.
 
@@ -177,7 +191,7 @@ src/
   handlers/     command, message, button 처리
   monitor/      uptime, resource, domain/TLS 감시
   storage/      session과 audit 상태
-  vault/        선택적 지식 저장소 연동
+  vault/        Obsidian 조회·제한된 즉시 편집·충돌 폴백
   webhook/      HMAC 검증과 provider별 event 처리
   workspaces/   thread별 Git checkout
 ```

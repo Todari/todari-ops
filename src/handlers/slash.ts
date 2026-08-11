@@ -5,6 +5,7 @@ import {
   ChannelType,
   MessageFlags,
   type ChatInputCommandInteraction,
+  type ThreadChannel,
 } from "discord.js";
 import { env } from "../env.js";
 import { findProject } from "../projects.js";
@@ -19,7 +20,6 @@ import { cancelActiveTurn, isTurnActive } from "../agent/run.js";
 import { spawnSessionThread } from "../agent/bootstrap.js";
 import { postDigest } from "../digest/daily.js";
 import { postWeekly } from "../digest/weekly.js";
-import { fetchInboxChannel } from "../discord/alerts.js";
 import { getUptimeSnapshot } from "../monitor/uptime.js";
 import { listSessions } from "../storage/sessions.js";
 import { addReminder, parseFireAt } from "../reminders/index.js";
@@ -33,6 +33,10 @@ import {
 } from "../vault/state.js";
 import { answerQuestion, correctSentence } from "../jp/tutor.js";
 import { dueCards, insertMistake } from "../jp/cards.js";
+import { captureOutcomeText, captureToVault } from "../vault/capture.js";
+import { completeVaultTask, type VaultTaskRef } from "../vault/mutations.js";
+import { completeCapturedVaultTask } from "../vault/state.js";
+import { captureException } from "../observability/sentry.js";
 
 export async function handleSlash(interaction: ChatInputCommandInteraction): Promise<void> {
   if (interaction.user.id !== env.OWNER_DISCORD_ID) {
@@ -156,7 +160,32 @@ async function handleEnd(interaction: ChatInputCommandInteraction): Promise<void
   if (session?.sessionId && thread.isThread()) {
     void postSessionSummary(thread, session);
   }
+  if (session?.sourceTask && thread.isThread()) {
+    void finishSourceTask(thread, session.sourceTask);
+  }
   await endSession(interaction.channelId);
+}
+
+async function finishSourceTask(
+  thread: ThreadChannel,
+  sourceTask: VaultTaskRef,
+): Promise<void> {
+  try {
+    const result = await completeVaultTask(sourceTask);
+    if (result.changed) {
+      await completeCapturedVaultTask(
+        sourceTask.note,
+        sourceTask.projectSlug,
+        sourceTask.text,
+      );
+      await thread.send(`✅ 볼트 할 일도 완료 처리했어요 — ${result.path ?? sourceTask.note}`);
+    } else {
+      await thread.send(`ℹ️ 볼트 체크박스는 이미 완료됐거나 찾지 못했어요 — ${sourceTask.text}`);
+    }
+  } catch (err) {
+    captureException(err, { kind: "vault-task-finish", projectSlug: sourceTask.projectSlug });
+    await thread.send("⚠️ 코드 세션은 종료했지만 볼트 완료 체크에 실패했어요. 태스크는 열린 상태로 유지합니다.");
+  }
 }
 
 async function handleDigest(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -167,8 +196,8 @@ async function handleDigest(interaction: ChatInputCommandInteraction): Promise<v
   });
 }
 
-// /task, /idea → structured 📥 line in the inbox channel. The Mac-side daily
-// sweeper (inbox-sweep skill) files them into the vault and ✅-acks them.
+// /task, /idea, /note → EC2에서 볼트 Git 저장소에 즉시 반영한다.
+// 충돌·해석 실패 시에만 기존 Discord 인박스로 폴백한다.
 async function handleCapture(
   interaction: ChatInputCommandInteraction,
   kind: "task" | "idea" | "note",
@@ -176,18 +205,11 @@ async function handleCapture(
   const content = interaction.options.getString("content", true).trim();
   const project =
     kind === "task" || kind === "note" ? interaction.options.getString("project") : null;
-  const channel = await fetchInboxChannel();
-  if (!channel) {
-    await interaction.reply({
-      content: "⚠️ 인박스 채널 없음 (INBOX_CHANNEL_ID / ALERTS_CHANNEL_ID 설정 필요)",
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-  await channel.send(`📥 [${kind}]${project ? ` (${project})` : ""} ${content}`);
-  await interaction.reply({
-    content: `✅ 인박스에 저장됨 — 매일 아침 스위퍼가 볼트로 정리합니다`,
-    flags: MessageFlags.Ephemeral,
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const outcome = await captureToVault(kind, project ?? undefined, content);
+  const label = kind === "task" ? "할 일" : kind === "idea" ? "아이디어" : "메모";
+  await interaction.editReply({
+    content: captureOutcomeText(outcome, label, project ?? undefined).slice(0, 1900),
   });
 }
 

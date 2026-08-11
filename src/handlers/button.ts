@@ -129,6 +129,7 @@ async function handleTriage(
       projectSlug: pending.projectSlug,
       permissionMode: "acceptEdits",
       prompt: pending.prompt,
+      ...(pending.sourceTask ? { sourceTask: pending.sourceTask } : {}),
     });
     deletePendingAction(id);
     const projectName = findProject(pending.projectSlug)?.name ?? pending.projectSlug;

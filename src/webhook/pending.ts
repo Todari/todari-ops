@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { VaultTaskRef } from "../vault/mutations.js";
 
 // Generic "click a button on an alert → start a /code session" store.
 // Sentry/Vercel/GitHub handlers put an action here at alert time; the
@@ -8,6 +9,7 @@ export interface PendingAction {
   projectSlug: string;
   threadName: string;
   prompt: string;
+  sourceTask?: VaultTaskRef;
   createdAt: number;
   ttlMs: number;
 }

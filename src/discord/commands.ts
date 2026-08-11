@@ -47,7 +47,7 @@ export const commands = [
   new SlashCommandBuilder().setName("digest").setDescription("Post today's digest now"),
   new SlashCommandBuilder()
     .setName("task")
-    .setDescription("Capture a task → inbox → vault (Mac sweeper)")
+    .setDescription("할 일을 볼트에 즉시 기록 (충돌 시 안전 큐)")
     .addStringOption((opt) =>
       opt.setName("content").setDescription("할 일 내용").setRequired(true),
     )
@@ -60,13 +60,13 @@ export const commands = [
     ),
   new SlashCommandBuilder()
     .setName("idea")
-    .setDescription("Capture an idea → inbox → vault 창/")
+    .setDescription("아이디어를 볼트 창/에 즉시 기록")
     .addStringOption((opt) =>
       opt.setName("content").setDescription("아이디어 내용").setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("note")
-    .setDescription("자유 지시 → inbox → 스위퍼가 볼트를 해석해 편집 (예: 우선순위 낮춰)")
+    .setDescription("볼트를 해석해 즉시 편집 (예: 우선순위 낮춰)")
     .addStringOption((opt) =>
       opt.setName("content").setDescription("지시 내용 (자연어)").setRequired(true),
     )

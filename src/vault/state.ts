@@ -1,11 +1,12 @@
-// Vault-derived task/deadline state, pushed by the Mac-side cron
-// (workspace-harness vault_sync.py) via POST /webhook/vault-sync. The full
-// vault never leaves the Mac — only open tasks and dated items land here.
+// Vault-derived task/deadline snapshot. Mac-side cron(vault_sync.py)이
+// POST /webhook/vault-sync로 전체 상태를 갱신하고, 봇이 직접 추가·완료한 태스크는
+// 다음 snapshot 전까지 이 파일에도 즉시 낙관적으로 반영한다.
 
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
+import { normalizeTaskText } from "./editor.js";
 
 export interface VaultTask {
   text: string;
@@ -53,6 +54,50 @@ export async function saveVaultState(state: VaultState): Promise<void> {
   const tmp = FILE + ".tmp";
   await writeFile(tmp, JSON.stringify(state, null, 2));
   await rename(tmp, FILE);
+}
+
+/** Reflect an EC2-side vault commit immediately, before the next Mac snapshot. */
+export async function addCapturedVaultTask(
+  note: string,
+  slug: string,
+  rawText: string,
+): Promise<void> {
+  const text = normalizeTaskText(rawText).slice(0, 300);
+  if (!text) return;
+  const current = getVaultState() ?? { generatedAt: new Date().toISOString(), notes: [] };
+  const notes = current.notes.map((entry) => ({
+    ...entry,
+    tasks: [...entry.tasks],
+    deadlines: [...entry.deadlines],
+  }));
+  let target = notes.find((entry) => entry.slug === slug || entry.note === note);
+  if (!target) {
+    target = { note, slug, tasks: [], deadlines: [] };
+    notes.push(target);
+  }
+  if (!target.tasks.some((task) => task.text === text)) {
+    const dueMatch = rawText.match(/📅\s*(\d{4}-\d{2}-\d{2})/);
+    target.tasks.unshift({
+      text,
+      ...(dueMatch?.[1] ? { due: dueMatch[1] } : {}),
+    });
+  }
+  await saveVaultState({ generatedAt: new Date().toISOString(), notes });
+}
+
+export async function completeCapturedVaultTask(
+  note: string,
+  slug: string,
+  rawText: string,
+): Promise<void> {
+  const state = getVaultState();
+  if (!state) return;
+  const text = normalizeTaskText(rawText);
+  const notes = state.notes.map((entry) => {
+    if (entry.slug !== slug && entry.note !== note) return entry;
+    return { ...entry, tasks: entry.tasks.filter((task) => task.text !== text) };
+  });
+  await saveVaultState({ generatedAt: new Date().toISOString(), notes });
 }
 
 /** Bound + strip an incoming payload so a bad sync can't blow up embeds. */

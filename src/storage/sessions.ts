@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
+import type { VaultTaskRef } from "../vault/mutations.js";
 
 export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions";
 
@@ -15,6 +16,7 @@ export interface Session {
   projectSlug: string;
   sessionId?: string;
   permissionMode: PermissionMode;
+  sourceTask?: VaultTaskRef;
   createdAt: number;
 }
 
@@ -50,11 +52,13 @@ export async function createSession(args: {
   threadId: string;
   projectSlug: string;
   permissionMode: PermissionMode;
+  sourceTask?: VaultTaskRef;
 }): Promise<Session> {
   const session: Session = {
     threadId: args.threadId,
     projectSlug: args.projectSlug,
     permissionMode: args.permissionMode,
+    ...(args.sourceTask ? { sourceTask: args.sourceTask } : {}),
     createdAt: Date.now(),
   };
   sessions.set(args.threadId, session);
