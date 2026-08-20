@@ -5,7 +5,8 @@ const validPayload = {
   account: "jakkuyagu",
   media_id: "17890000000000000",
   permalink: "https://www.instagram.com/p/example/",
-  caption: "오늘 경기 프리뷰",
+  preview_url: "https://bucket.s3.ap-northeast-2.amazonaws.com/preview.png?signature=test",
+  caption: "오늘 경기 프리뷰\n선발 라인업과 관전 포인트를 확인하세요.",
   content_type: "preview",
   source_key: "2026-08-20:preview:game-1",
   published_at: "2026-08-20T12:34:56+09:00",
@@ -20,11 +21,22 @@ describe("Instagram webhook event", () => {
     const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
 
     expect(json).toMatchObject({
-      title: "자꾸야구 게시물 업로드 완료",
+      title: "새 게시물 · 오늘 경기 프리뷰",
       url: validPayload.permalink,
-      description: validPayload.caption,
+      description: "선발 라인업과 관전 포인트를 확인하세요.",
+      image: { url: validPayload.preview_url },
     });
     expect(message.components).toHaveLength(1);
+    const row = message.components?.[0];
+    const rowJson = row && "toJSON" in row ? row.toJSON() : row;
+    expect(rowJson).toMatchObject({
+      components: [
+        {
+          label: "게시물 바로 보기",
+          url: validPayload.permalink,
+        },
+      ],
+    });
   });
 
   it("rejects unknown accounts and non-Instagram links", () => {
@@ -37,6 +49,12 @@ describe("Instagram webhook event", () => {
   it("allows a notification when permalink lookup was unavailable", () => {
     const event = normalizeInstagramEvent({ ...validPayload, permalink: null });
     expect(event?.permalink).toBeNull();
-    expect(buildInstagramMessage(event!).components).toBeUndefined();
+    expect(buildInstagramMessage(event!).components).toHaveLength(1);
+  });
+
+  it("rejects non-HTTPS preview images", () => {
+    expect(
+      normalizeInstagramEvent({ ...validPayload, preview_url: "http://example.com/preview.png" }),
+    ).toBeNull();
   });
 });

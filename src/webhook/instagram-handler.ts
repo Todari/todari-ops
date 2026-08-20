@@ -28,6 +28,7 @@ export interface InstagramPostEvent {
   account: Account;
   mediaId: string;
   permalink: string | null;
+  previewUrl: string | null;
   caption: string;
   contentType: string | null;
   sourceKey: string | null;
@@ -58,11 +59,18 @@ export function normalizeInstagramEvent(payload: unknown): InstagramPostEvent | 
     if (candidate === null || !isInstagramUrl(candidate)) return null;
     permalink = candidate;
   }
+  let previewUrl: string | null = null;
+  if (raw.preview_url !== null && raw.preview_url !== undefined && raw.preview_url !== "") {
+    const candidate = boundedString(raw.preview_url, 2_000, false);
+    if (candidate === null || !isHttpsUrl(candidate)) return null;
+    previewUrl = candidate;
+  }
 
   return {
     account: raw.account,
     mediaId,
     permalink,
+    previewUrl,
     caption,
     contentType,
     sourceKey,
@@ -73,34 +81,42 @@ export function normalizeInstagramEvent(payload: unknown): InstagramPostEvent | 
 export function buildInstagramMessage(event: InstagramPostEvent): MessageCreateOptions {
   const account = ACCOUNTS[event.account];
   const targetUrl = event.permalink ?? account.profileUrl;
+  const caption = event.caption.trim();
+  const [headline, ...bodyLines] = caption.split("\n");
+  const body = bodyLines.join("\n").trim();
   const embed = new EmbedBuilder()
     .setColor(account.color)
-    .setTitle(`${account.displayName} 게시물 업로드 완료`)
+    .setTitle(
+      headline
+        ? `새 게시물 · ${truncate(headline, 180)}`
+        : `${account.displayName} 새 게시물 업로드 완료`,
+    )
     .setURL(targetUrl)
-    .setAuthor({ name: `${account.handle} · Instagram Bot` })
+    .setAuthor({ name: `${account.displayName} ${account.handle}` })
     .setTimestamp(new Date(event.publishedAt))
-    .setFooter({ text: `media ${event.mediaId}` });
+    .setFooter({ text: "Instagram 자동 게시 완료" });
 
-  if (event.caption.trim()) embed.setDescription(truncate(event.caption.trim(), 1_500));
-  if (event.contentType || event.sourceKey) {
+  if (body) embed.setDescription(truncate(body, 1_500));
+  if (event.contentType) {
     embed.addFields({
-      name: "콘텐츠",
-      value: [event.contentType, event.sourceKey].filter(Boolean).join(" · "),
+      name: "게시물 유형",
+      value: contentTypeLabel(event.contentType, event.account),
+      inline: true,
     });
   }
+  if (event.previewUrl) embed.setImage(event.previewUrl);
 
-  const message: MessageCreateOptions = { embeds: [embed] };
-  if (event.permalink) {
-    message.components = [
+  return {
+    embeds: [embed],
+    components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setStyle(ButtonStyle.Link)
-          .setLabel("Instagram에서 보기")
-          .setURL(event.permalink),
+          .setLabel(event.permalink ? "게시물 바로 보기" : "Instagram 프로필 열기")
+          .setURL(targetUrl),
       ),
-    ];
-  }
-  return message;
+    ],
+  };
 }
 
 /** 같은 게시기의 네트워크 재시도는 한 번만 Discord에 표시한다. */
@@ -141,6 +157,35 @@ function isInstagramUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function contentTypeLabel(value: string, account: Account): string {
+  const labels: Record<string, string> = {
+    preview: "경기 프리뷰",
+    pregame_preview: "경기 프리뷰",
+    "result-card": "경기 결과",
+    flow: "승부의 흐름",
+    "race-result": "레이스 결과",
+    quali: "예선 결과",
+    racepreview: "레이스 프리뷰",
+    lastyear: "지난 시즌 돌아보기",
+    champ: "챔피언십 순위",
+    weekend: "레이스 주말 일정",
+    form: "드라이버 폼 가이드",
+    stock: "F1 스톡 콘텐츠",
+    "integration-test": "연동 테스트",
+    "interface-preview": "알림 UI 미리보기",
+  };
+  if (value === "result") return account === "sector4" ? "레이스 결과" : "경기 결과";
+  return labels[value] ?? value;
 }
 
 function truncate(value: string, max: number): string {
