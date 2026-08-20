@@ -27,6 +27,7 @@ describe("Instagram webhook event", () => {
       image: { url: validPayload.preview_url },
     });
     expect(message.components).toHaveLength(1);
+    expect(json).toMatchObject({ author: { name: "야있날 @yaitnal" } });
     const row = message.components?.[0];
     const rowJson = row && "toJSON" in row ? row.toJSON() : row;
     expect(rowJson).toMatchObject({

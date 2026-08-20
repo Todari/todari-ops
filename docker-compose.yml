@@ -22,7 +22,7 @@ services:
       # 일본어 학습 push 채널 (#일본어). 비밀 아님(서버 멤버에게 공개되는 채널 ID)이라
       # .env.production(EC2 전용, rsync 제외) 대신 여기 두어 배포로 함께 반영한다.
       - JP_CHANNEL_ID=1530151026974527569
-      # 자꾸야구·섹터4 Instagram 게시 성공 알림 채널 (#instagram-bot)
+      # 야있날·섹터4 Instagram 게시 성공 알림 채널 (#instagram-bot)
       - INSTAGRAM_CHANNEL_ID=1539849876429475841
       # 자연어 대화 채널(#토다리) — 여기 메시지는 의도 분류→라우팅
       - NL_CHANNEL_ID=1531185484985008128

@@ -9,9 +9,9 @@ import { fetchInstagramChannel } from "../discord/alerts.js";
 
 const ACCOUNTS = {
   jakkuyagu: {
-    displayName: "자꾸야구",
-    handle: "@jakku.yagu",
-    profileUrl: "https://www.instagram.com/jakku.yagu/",
+    displayName: "야있날",
+    handle: "@yaitnal",
+    profileUrl: "https://www.instagram.com/yaitnal/",
     color: 0x1d4ed8,
   },
   sector4: {
