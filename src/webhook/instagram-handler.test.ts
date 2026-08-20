@@ -49,13 +49,56 @@ describe("Instagram webhook event", () => {
 
   it("allows a notification when permalink lookup was unavailable", () => {
     const event = normalizeInstagramEvent({ ...validPayload, permalink: null });
-    expect(event?.permalink).toBeNull();
+    expect(event?.status).toBe("published");
+    if (!event || event.status !== "published") throw new Error("expected published event");
+    expect(event.permalink).toBeNull();
     expect(buildInstagramMessage(event!).components).toHaveLength(1);
   });
 
   it("rejects non-HTTPS preview images", () => {
     expect(
       normalizeInstagramEvent({ ...validPayload, preview_url: "http://example.com/preview.png" }),
+    ).toBeNull();
+  });
+
+  it("builds an actionable red embed for a sanitized publish failure", () => {
+    const event = normalizeInstagramEvent({
+      account: "sector4",
+      status: "failed",
+      error_type: "RuntimeError",
+      error_message: "Instagram Graph API 오류(400): token expired",
+      content_type: "sector4-poller",
+      source_key: "result-2026-r13",
+      occurred_at: "2026-08-20T14:45:00+09:00",
+    });
+    expect(event).not.toBeNull();
+
+    const message = buildInstagramMessage(event!);
+    const embed = message.embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({
+      color: 0xed4245,
+      title: "섹터4 자동 게시 실패",
+      description: "Instagram Graph API 오류(400): token expired",
+      author: { name: "섹터4 @sector4.f1" },
+    });
+    expect(json?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "실패 단계", value: "섹터4 스케줄러" }),
+        expect.objectContaining({ name: "대상", value: "`result-2026-r13`" }),
+      ]),
+    );
+  });
+
+  it("rejects malformed failure events", () => {
+    expect(
+      normalizeInstagramEvent({
+        account: "jakkuyagu",
+        status: "failed",
+        error_type: "RuntimeError",
+        error_message: "",
+        occurred_at: "not-a-date",
+      }),
     ).toBeNull();
   });
 });

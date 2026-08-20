@@ -25,6 +25,7 @@ const ACCOUNTS = {
 type Account = keyof typeof ACCOUNTS;
 
 export interface InstagramPostEvent {
+  status: "published";
   account: Account;
   mediaId: string;
   permalink: string | null;
@@ -35,22 +36,60 @@ export interface InstagramPostEvent {
   publishedAt: string;
 }
 
-const delivered = new Map<string, number>();
-const DEDUPE_MS = 7 * 24 * 60 * 60 * 1000;
+export interface InstagramFailureEvent {
+  status: "failed";
+  account: Account;
+  errorType: string;
+  errorMessage: string;
+  contentType: string | null;
+  sourceKey: string | null;
+  occurredAt: string;
+}
 
-export function normalizeInstagramEvent(payload: unknown): InstagramPostEvent | null {
+export type InstagramEvent = InstagramPostEvent | InstagramFailureEvent;
+
+const delivered = new Map<string, { timestamp: number; ttl: number }>();
+const SUCCESS_DEDUPE_MS = 7 * 24 * 60 * 60 * 1000;
+const FAILURE_DEDUPE_MS = 6 * 60 * 60 * 1000;
+
+export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const raw = payload as Record<string, unknown>;
   if (raw.account !== "jakkuyagu" && raw.account !== "sector4") return null;
 
-  const mediaId = boundedString(raw.media_id, 100, false);
-  const caption = boundedString(raw.caption, 2_200, true);
   const contentType = optionalString(raw.content_type, 80);
   const sourceKey = optionalString(raw.source_key, 200);
-  const publishedAt = boundedString(raw.published_at, 80, false);
-  if (mediaId === null || caption === null || contentType === undefined || sourceKey === undefined) {
-    return null;
+  if (contentType === undefined || sourceKey === undefined) return null;
+
+  const status = raw.status ?? "published";
+  if (status === "failed") {
+    const errorType = boundedString(raw.error_type, 120, false);
+    const errorMessage = boundedString(raw.error_message, 1_500, false);
+    const occurredAt = boundedString(raw.occurred_at, 80, false);
+    if (
+      errorType === null ||
+      errorMessage === null ||
+      occurredAt === null ||
+      Number.isNaN(Date.parse(occurredAt))
+    ) {
+      return null;
+    }
+    return {
+      status,
+      account: raw.account,
+      errorType,
+      errorMessage,
+      contentType,
+      sourceKey,
+      occurredAt: new Date(occurredAt).toISOString(),
+    };
   }
+  if (status !== "published") return null;
+
+  const mediaId = boundedString(raw.media_id, 100, false);
+  const caption = boundedString(raw.caption, 2_200, true);
+  const publishedAt = boundedString(raw.published_at, 80, false);
+  if (mediaId === null || caption === null) return null;
   if (publishedAt === null || Number.isNaN(Date.parse(publishedAt))) return null;
 
   let permalink: string | null = null;
@@ -67,6 +106,7 @@ export function normalizeInstagramEvent(payload: unknown): InstagramPostEvent | 
   }
 
   return {
+    status,
     account: raw.account,
     mediaId,
     permalink,
@@ -78,7 +118,9 @@ export function normalizeInstagramEvent(payload: unknown): InstagramPostEvent | 
   };
 }
 
-export function buildInstagramMessage(event: InstagramPostEvent): MessageCreateOptions {
+export function buildInstagramMessage(event: InstagramEvent): MessageCreateOptions {
+  if (event.status === "failed") return buildFailureMessage(event);
+
   const account = ACCOUNTS[event.account];
   const targetUrl = event.permalink ?? account.profileUrl;
   const caption = event.caption.trim();
@@ -119,19 +161,61 @@ export function buildInstagramMessage(event: InstagramPostEvent): MessageCreateO
   };
 }
 
-/** 같은 게시기의 네트워크 재시도는 한 번만 Discord에 표시한다. */
-export async function handleInstagramEvent(event: InstagramPostEvent): Promise<boolean> {
-  const now = Date.now();
-  for (const [key, timestamp] of delivered) {
-    if (now - timestamp > DEDUPE_MS) delivered.delete(key);
+function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions {
+  const account = ACCOUNTS[event.account];
+  const embed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle(`${account.displayName} 자동 게시 실패`)
+    .setURL(account.profileUrl)
+    .setAuthor({ name: `${account.displayName} ${account.handle}` })
+    .setDescription(event.errorMessage)
+    .setTimestamp(new Date(event.occurredAt))
+    .setFooter({ text: "Instagram 자동 게시 오류 · 같은 오류는 6시간 동안 생략" })
+    .addFields({ name: "오류 종류", value: event.errorType, inline: true });
+
+  if (event.contentType) {
+    embed.addFields({
+      name: "실패 단계",
+      value: contentTypeLabel(event.contentType, event.account),
+      inline: true,
+    });
   }
-  const dedupeKey = `${event.account}:${event.mediaId}`;
+  if (event.sourceKey) {
+    embed.addFields({ name: "대상", value: `\`${event.sourceKey}\`` });
+  }
+
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setStyle(ButtonStyle.Link)
+          .setLabel("Instagram 계정 확인")
+          .setURL(account.profileUrl),
+      ),
+    ],
+  };
+}
+
+/** 같은 게시기의 네트워크 재시도는 한 번만 Discord에 표시한다. */
+export async function handleInstagramEvent(event: InstagramEvent): Promise<boolean> {
+  const now = Date.now();
+  for (const [key, record] of delivered) {
+    if (now - record.timestamp > record.ttl) delivered.delete(key);
+  }
+  const dedupeKey =
+    event.status === "published"
+      ? `published:${event.account}:${event.mediaId}`
+      : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.errorType}:${event.errorMessage}`;
   if (delivered.has(dedupeKey)) return false;
 
   const channel = await fetchInstagramChannel();
   if (!channel) throw new Error("Instagram Discord channel unavailable");
   await channel.send(buildInstagramMessage(event));
-  delivered.set(dedupeKey, now);
+  delivered.set(dedupeKey, {
+    timestamp: now,
+    ttl: event.status === "published" ? SUCCESS_DEDUPE_MS : FAILURE_DEDUPE_MS,
+  });
   return true;
 }
 
@@ -183,6 +267,9 @@ function contentTypeLabel(value: string, account: Account): string {
     stock: "F1 스톡 콘텐츠",
     "integration-test": "연동 테스트",
     "interface-preview": "알림 UI 미리보기",
+    "daily-content": "야있날 일일 콘텐츠",
+    "sector4-poller": "섹터4 스케줄러",
+    "publish-carousel": "캐러셀 게시",
   };
   if (value === "result") return account === "sector4" ? "레이스 결과" : "경기 결과";
   return labels[value] ?? value;
