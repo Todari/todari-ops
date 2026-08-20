@@ -11,6 +11,15 @@ export function verifySentry(
   return verifyHexHmac("sha256", rawBody, signatureHeader, secret);
 }
 
+// 자꾸야구·섹터4 게시기는 JSON 원문을 공유 시크릿으로 HMAC-SHA256 서명한다.
+export function verifyInstagram(
+  rawBody: Buffer,
+  signatureHeader: string | undefined,
+  secret: string,
+): boolean {
+  return verifyHexHmac("sha256", rawBody, signatureHeader, secret);
+}
+
 // GitHub signs with HMAC SHA256. Header: `X-Hub-Signature-256: sha256=<hex>`.
 export function verifyGithub(
   rawBody: Buffer,

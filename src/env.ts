@@ -27,6 +27,8 @@ export const env = {
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET ?? "",
   VERCEL_WEBHOOK_SECRET: process.env.VERCEL_WEBHOOK_SECRET ?? "",
   VAULT_SYNC_SECRET: process.env.VAULT_SYNC_SECRET ?? "",
+  INSTAGRAM_WEBHOOK_SECRET: process.env.INSTAGRAM_WEBHOOK_SECRET ?? "",
+  INSTAGRAM_CHANNEL_ID: process.env.INSTAGRAM_CHANNEL_ID ?? "",
   INBOX_CHANNEL_ID: process.env.INBOX_CHANNEL_ID ?? "",
   WEBHOOK_ENABLED: (process.env.WEBHOOK_ENABLED ?? "true").toLowerCase() === "true",
   UPTIME_ENABLED: (process.env.UPTIME_ENABLED ?? "true").toLowerCase() === "true",

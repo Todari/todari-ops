@@ -1,13 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { env } from "../env.js";
 import { captureException } from "../observability/sentry.js";
-import { verifyGithub, verifySentry, verifyVercel } from "./verify.js";
+import { verifyGithub, verifyInstagram, verifySentry, verifyVercel } from "./verify.js";
 import { handleSentryEvent } from "./sentry-handler.js";
 import { handleGithubEvent } from "./github-handler.js";
 import { handleVercelEvent } from "./vercel-handler.js";
 import { normalizeVaultState, saveVaultState } from "../vault/state.js";
 import { updateDailyTopic } from "../digest/daily.js";
 import { jpExport } from "../jp/export.js";
+import { handleInstagramEvent, normalizeInstagramEvent } from "./instagram-handler.js";
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -20,6 +21,7 @@ export function startWebhookServer(): void {
     ["github", env.GITHUB_WEBHOOK_SECRET],
     ["vercel", env.VERCEL_WEBHOOK_SECRET],
     ["vault-sync", env.VAULT_SYNC_SECRET],
+    ["instagram", env.INSTAGRAM_WEBHOOK_SECRET],
   ] as const) {
     if (!secret) console.warn(`[webhook] ${name} secret missing — /webhook/${name} disabled`);
   }
@@ -61,12 +63,46 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     await handleVaultSync(req, res);
     return;
   }
+  if (method === "POST" && url === "/webhook/instagram") {
+    await handleInstagramWebhook(req, res);
+    return;
+  }
   if (method === "POST" && url === "/jp/export") {
     await handleJpExport(req, res);
     return;
   }
 
   writeJson(res, 404, { error: "not found" });
+}
+
+async function handleInstagramWebhook(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (!env.INSTAGRAM_WEBHOOK_SECRET || !env.INSTAGRAM_CHANNEL_ID) {
+    writeJson(res, 503, { error: "instagram webhook disabled" });
+    return;
+  }
+  const body = await readBody(req);
+  if (
+    !verifyInstagram(
+      body,
+      headerValue(req, "x-instagram-signature"),
+      env.INSTAGRAM_WEBHOOK_SECRET,
+    )
+  ) {
+    writeJson(res, 401, { error: "invalid signature" });
+    return;
+  }
+  const payload = parseJson(body, res);
+  if (payload === undefined) return;
+  const event = normalizeInstagramEvent(payload);
+  if (!event) {
+    writeJson(res, 400, { error: "invalid shape" });
+    return;
+  }
+  const delivered = await handleInstagramEvent(event);
+  writeJson(res, 200, { ok: true, delivered });
 }
 
 // Mac-side cron (workspace-harness vault_sync.py) pushes extracted vault

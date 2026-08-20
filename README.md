@@ -109,6 +109,8 @@ pnpm dev
 | `WORK_DIR` | `./data/work` | thread별 checkout과 세션 상태 위치 |
 | `ACTION_ALLOWLIST` | `Edit,Write,Bash` | Discord에서 승인 가능한 도구 |
 | `ALERTS_CHANNEL_ID` | 빈 값 | 운영 알림 채널 |
+| `INSTAGRAM_CHANNEL_ID` | 빈 값 | 자꾸야구·섹터4 게시 성공 알림 채널 |
+| `INSTAGRAM_WEBHOOK_SECRET` | 빈 값 | Instagram 게시기와 공유하는 HMAC 시크릿 |
 | `BOT_PUBLIC_HOST` | Todari 운영 host | 봇 자체 domain/TLS 감시 대상 |
 | `VAULT_REPO_URL` | Todari vault repository | 읽기·즉시 기록에 사용할 private Obsidian 저장소 |
 | `WEBHOOK_ENABLED` | `true` | HTTP webhook server 활성화 |
@@ -145,6 +147,7 @@ HTTP server는 다음 endpoint를 제공합니다.
 | `POST /webhook/github` | `GITHUB_WEBHOOK_SECRET` |
 | `POST /webhook/vercel` | `VERCEL_WEBHOOK_SECRET` |
 | `POST /webhook/vault-sync` | `VAULT_SYNC_SECRET` |
+| `POST /webhook/instagram` | `INSTAGRAM_WEBHOOK_SECRET` (`X-Instagram-Signature`) |
 
 외부에 노출할 때는 nginx, Caddy 같은 reverse proxy에서 TLS를 종료하고 bot port는 loopback에만
 bind하는 구성을 권장합니다.

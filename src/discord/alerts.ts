@@ -22,6 +22,10 @@ export async function fetchJpChannel(): Promise<TextChannel | null> {
   return id ? fetchTextChannel(id, "jp") : null;
 }
 
+export async function fetchInstagramChannel(): Promise<TextChannel | null> {
+  return fetchTextChannel(env.INSTAGRAM_CHANNEL_ID, "instagram");
+}
+
 async function fetchTextChannel(id: string, label: string): Promise<TextChannel | null> {
   if (!id) {
     console.warn(`[discord] ${label} channel id empty — drop`);
