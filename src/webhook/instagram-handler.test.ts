@@ -9,6 +9,21 @@ const validPayload = {
   caption: "오늘 경기 프리뷰\n선발 라인업과 관전 포인트를 확인하세요.",
   content_type: "preview",
   source_key: "2026-08-20:preview:game-1",
+  quality_review: {
+    audience: "baseball_fan",
+    overall_score: 84,
+    scores: {
+      factual_trust: 95,
+      information_density: 78,
+      game_story: 82,
+      fan_interest: 83,
+      natural_voice: 80,
+      visual_delivery: 86,
+    },
+    summary: "경기 흐름이 잘 보이지만 한 장면의 맥락은 더 보강할 수 있습니다.",
+    strengths: ["득점 전후 점수가 명확합니다."],
+    improvements: ["투수 교체 뒤 흐름을 한 문장 더 연결하세요."],
+  },
   published_at: "2026-08-20T12:34:56+09:00",
 };
 
@@ -28,6 +43,12 @@ describe("Instagram webhook event", () => {
     });
     expect(message.components).toHaveLength(1);
     expect(json).toMatchObject({ author: { name: "야있날 @yaitnal" } });
+    expect(json?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "야구팬 관점 품질 점수" }),
+        expect.objectContaining({ name: "다음 생성에서 개선" }),
+      ]),
+    );
     const row = message.components?.[0];
     const rowJson = row && "toJSON" in row ? row.toJSON() : row;
     expect(rowJson).toMatchObject({
@@ -55,6 +76,13 @@ describe("Instagram webhook event", () => {
     expect(buildInstagramMessage(event!).components).toHaveLength(1);
   });
 
+  it("keeps compatibility with publishers that have no fan review yet", () => {
+    const event = normalizeInstagramEvent({ ...validPayload, quality_review: null });
+    expect(event?.status).toBe("published");
+    if (!event || event.status !== "published") throw new Error("expected published event");
+    expect(event.qualityReview).toBeNull();
+  });
+
   it("rejects non-HTTPS preview images", () => {
     expect(
       normalizeInstagramEvent({ ...validPayload, preview_url: "http://example.com/preview.png" }),
@@ -69,6 +97,10 @@ describe("Instagram webhook event", () => {
       error_message: "Instagram Graph API 오류(400): token expired",
       content_type: "sector4-poller",
       source_key: "result-2026-r13",
+      stage: "media_publish",
+      failure_category: "ambiguous_publish",
+      attempt: 2,
+      next_retry_at: "2026-08-20T15:00:00+09:00",
       occurred_at: "2026-08-20T14:45:00+09:00",
     });
     expect(event).not.toBeNull();
@@ -84,7 +116,10 @@ describe("Instagram webhook event", () => {
     });
     expect(json?.fields).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: "실패 단계", value: "섹터4 스케줄러" }),
+        expect.objectContaining({ name: "게시물 유형", value: "섹터4 스케줄러" }),
+        expect.objectContaining({ name: "실패 지점", value: "Instagram 최종 게시" }),
+        expect.objectContaining({ name: "원인 분류", value: "게시 응답 불명확 · 중복 대조 필요" }),
+        expect.objectContaining({ name: "누적 시도", value: "2회" }),
         expect.objectContaining({ name: "대상", value: "`result-2026-r13`" }),
       ]),
     );

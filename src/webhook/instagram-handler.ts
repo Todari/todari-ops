@@ -33,7 +33,17 @@ export interface InstagramPostEvent {
   caption: string;
   contentType: string | null;
   sourceKey: string | null;
+  qualityReview: InstagramQualityReview | null;
   publishedAt: string;
+}
+
+export interface InstagramQualityReview {
+  audience: "baseball_fan" | "f1_fan";
+  overallScore: number;
+  scores: Record<string, number>;
+  summary: string;
+  strengths: string[];
+  improvements: string[];
 }
 
 export interface InstagramFailureEvent {
@@ -43,6 +53,10 @@ export interface InstagramFailureEvent {
   errorMessage: string;
   contentType: string | null;
   sourceKey: string | null;
+  stage: string | null;
+  failureCategory: string | null;
+  attempt: number | null;
+  nextRetryAt: string | null;
   occurredAt: string;
 }
 
@@ -66,11 +80,19 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
     const errorType = boundedString(raw.error_type, 120, false);
     const errorMessage = boundedString(raw.error_message, 1_500, false);
     const occurredAt = boundedString(raw.occurred_at, 80, false);
+    const stage = optionalString(raw.stage, 120);
+    const failureCategory = optionalString(raw.failure_category, 120);
+    const attempt = optionalPositiveInteger(raw.attempt);
+    const nextRetryAt = optionalDate(raw.next_retry_at);
     if (
       errorType === null ||
       errorMessage === null ||
       occurredAt === null ||
-      Number.isNaN(Date.parse(occurredAt))
+      Number.isNaN(Date.parse(occurredAt)) ||
+      stage === undefined ||
+      failureCategory === undefined ||
+      attempt === undefined ||
+      nextRetryAt === undefined
     ) {
       return null;
     }
@@ -81,6 +103,10 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
       errorMessage,
       contentType,
       sourceKey,
+      stage,
+      failureCategory,
+      attempt,
+      nextRetryAt,
       occurredAt: new Date(occurredAt).toISOString(),
     };
   }
@@ -89,8 +115,12 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
   const mediaId = boundedString(raw.media_id, 100, false);
   const caption = boundedString(raw.caption, 2_200, true);
   const publishedAt = boundedString(raw.published_at, 80, false);
+  const qualityReview = optionalQualityReview(raw.quality_review);
   if (mediaId === null || caption === null) return null;
-  if (publishedAt === null || Number.isNaN(Date.parse(publishedAt))) return null;
+  if (
+    publishedAt === null || Number.isNaN(Date.parse(publishedAt)) ||
+    qualityReview === undefined
+  ) return null;
 
   let permalink: string | null = null;
   if (raw.permalink !== null && raw.permalink !== undefined && raw.permalink !== "") {
@@ -114,6 +144,7 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
     caption,
     contentType,
     sourceKey,
+    qualityReview,
     publishedAt: new Date(publishedAt).toISOString(),
   };
 }
@@ -146,6 +177,25 @@ export function buildInstagramMessage(event: InstagramEvent): MessageCreateOptio
       inline: true,
     });
   }
+  if (event.qualityReview) {
+    const audience = event.qualityReview.audience === "f1_fan" ? "F1 팬" : "야구팬";
+    embed.addFields(
+      {
+        name: `${audience} 관점 품질 점수`,
+        value: `**${event.qualityReview.overallScore}/100** · ${truncate(event.qualityReview.summary, 700)}`,
+      },
+      {
+        name: "잘된 점",
+        value: truncate(event.qualityReview.strengths.map((item) => `• ${item}`).join("\n"), 900),
+        inline: true,
+      },
+      {
+        name: "다음 생성에서 개선",
+        value: truncate(event.qualityReview.improvements.map((item) => `• ${item}`).join("\n"), 900),
+        inline: true,
+      },
+    );
+  }
   if (event.previewUrl) embed.setImage(event.previewUrl);
 
   return {
@@ -170,13 +220,37 @@ function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions
     .setAuthor({ name: `${account.displayName} ${account.handle}` })
     .setDescription(event.errorMessage)
     .setTimestamp(new Date(event.occurredAt))
-    .setFooter({ text: "Instagram 자동 게시 오류 · 같은 오류는 6시간 동안 생략" })
+    .setFooter({
+      text: event.nextRetryAt
+        ? "Instagram 자동 게시 오류 · 원인 기록 후 자동 재시도"
+        : "Instagram 자동 게시 오류 · 같은 오류는 6시간 동안 생략",
+    })
     .addFields({ name: "오류 종류", value: event.errorType, inline: true });
 
   if (event.contentType) {
     embed.addFields({
-      name: "실패 단계",
+      name: "게시물 유형",
       value: contentTypeLabel(event.contentType, event.account),
+      inline: true,
+    });
+  }
+  if (event.stage) {
+    embed.addFields({ name: "실패 지점", value: stageLabel(event.stage), inline: true });
+  }
+  if (event.failureCategory) {
+    embed.addFields({
+      name: "원인 분류",
+      value: failureCategoryLabel(event.failureCategory),
+      inline: true,
+    });
+  }
+  if (event.attempt) {
+    embed.addFields({ name: "누적 시도", value: `${event.attempt}회`, inline: true });
+  }
+  if (event.nextRetryAt) {
+    embed.addFields({
+      name: "다음 재시도",
+      value: `<t:${Math.floor(Date.parse(event.nextRetryAt) / 1000)}:R>`,
       inline: true,
     });
   }
@@ -206,7 +280,7 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
   const dedupeKey =
     event.status === "published"
       ? `published:${event.account}:${event.mediaId}`
-      : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.errorType}:${event.errorMessage}`;
+      : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.stage ?? "unknown"}:${event.failureCategory ?? event.errorType}:${event.errorMessage}`;
   if (delivered.has(dedupeKey)) return false;
 
   const channel = await fetchInstagramChannel();
@@ -229,6 +303,60 @@ function optionalString(value: unknown, max: number): string | null | undefined 
   if (value === null || value === undefined || value === "") return null;
   const result = boundedString(value, max, false);
   return result === null ? undefined : result;
+}
+
+function optionalPositiveInteger(value: unknown): number | null | undefined {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) return undefined;
+  return value;
+}
+
+function optionalDate(value: unknown): string | null | undefined {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = boundedString(value, 80, false);
+  if (raw === null || Number.isNaN(Date.parse(raw))) return undefined;
+  return new Date(raw).toISOString();
+}
+
+function optionalQualityReview(value: unknown): InstagramQualityReview | null | undefined {
+  if (value === null || value === undefined || value === "") return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.audience !== "baseball_fan" && raw.audience !== "f1_fan") return undefined;
+  if (
+    typeof raw.overall_score !== "number" || !Number.isInteger(raw.overall_score) ||
+    raw.overall_score < 0 || raw.overall_score > 100
+  ) return undefined;
+  const summary = boundedString(raw.summary, 800, false);
+  const strengths = boundedStringArray(raw.strengths, 3, 500);
+  const improvements = boundedStringArray(raw.improvements, 3, 500);
+  if (summary === null || strengths === null || improvements === null) return undefined;
+  if (!raw.scores || typeof raw.scores !== "object" || Array.isArray(raw.scores)) return undefined;
+  const scores: Record<string, number> = {};
+  for (const [key, score] of Object.entries(raw.scores as Record<string, unknown>)) {
+    if (
+      !/^[a-z][a-z0-9_]{0,49}$/.test(key) || typeof score !== "number" ||
+      !Number.isInteger(score) || score < 0 || score > 100
+    ) return undefined;
+    scores[key] = score;
+  }
+  if (Object.keys(scores).length === 0 || Object.keys(scores).length > 12) return undefined;
+  return {
+    audience: raw.audience,
+    overallScore: raw.overall_score,
+    scores,
+    summary,
+    strengths,
+    improvements,
+  };
+}
+
+function boundedStringArray(value: unknown, maxItems: number, maxLength: number): string[] | null {
+  if (
+    !Array.isArray(value) || value.length < 1 || value.length > maxItems ||
+    value.some((item) => boundedString(item, maxLength, false) === null)
+  ) return null;
+  return value as string[];
 }
 
 function isInstagramUrl(value: string): boolean {
@@ -259,11 +387,16 @@ function contentTypeLabel(value: string, account: Account): string {
     flow: "승부의 흐름",
     "race-result": "레이스 결과",
     quali: "예선 결과",
+    sprintquali: "스프린트 예선 결과",
+    sprintresult: "스프린트 결과",
     racepreview: "레이스 프리뷰",
     lastyear: "지난 시즌 돌아보기",
     champ: "챔피언십 순위",
     weekend: "레이스 주말 일정",
     form: "드라이버 폼 가이드",
+    history: "서킷 역사",
+    circuit: "서킷 데이터 가이드",
+    glossary: "F1 용어사전",
     stock: "F1 스톡 콘텐츠",
     "integration-test": "연동 테스트",
     "interface-preview": "알림 UI 미리보기",
@@ -272,6 +405,45 @@ function contentTypeLabel(value: string, account: Account): string {
     "publish-carousel": "캐러셀 게시",
   };
   if (value === "result") return account === "sector4" ? "레이스 결과" : "경기 결과";
+  return labels[value] ?? value;
+}
+
+function stageLabel(value: string): string {
+  const labels: Record<string, string> = {
+    daily_schedule: "일일 경기 일정 수집",
+    kbo_schedule: "KBO 일정 수집",
+    kbo_lineup: "확정 라인업 수집",
+    season_results: "시즌 기록 수집",
+    naver_preview: "네이버 프리뷰 수집",
+    source_snapshot: "사실 스냅샷 검증",
+    scheduler_data_probe: "예약 데이터 확인",
+    ai_editorial: "AI 초안·편집",
+    ai_scene_selection: "AI 장면 선택",
+    ai_editorial_release: "AI 편집·출고 검수",
+    render: "카드 렌더",
+    visual_review: "AI 시각 검수",
+    s3_upload: "미디어 업로드",
+    container_create: "Instagram 컨테이너 생성",
+    child_container_create: "캐러셀 항목 생성",
+    carousel_container_create: "캐러셀 생성",
+    container_status: "Instagram 미디어 처리",
+    instagram_publish: "Instagram 게시",
+    media_publish: "Instagram 최종 게시",
+    publish_reconciliation: "게시 성공 여부 대조",
+  };
+  return labels[value] ?? value;
+}
+
+function failureCategoryLabel(value: string): string {
+  const labels: Record<string, string> = {
+    transient: "일시적 네트워크·서버 오류",
+    ai_quality: "AI 생성·검수 미통과",
+    source_data: "원천 데이터 미도착·부족",
+    source_validation: "원천 데이터 불일치",
+    auth: "인증 오류",
+    configuration: "설정·요청 오류",
+    ambiguous_publish: "게시 응답 불명확 · 중복 대조 필요",
+  };
   return labels[value] ?? value;
 }
 
