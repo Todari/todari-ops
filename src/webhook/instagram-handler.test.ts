@@ -83,6 +83,52 @@ describe("Instagram webhook event", () => {
     expect(event.qualityReview).toBeNull();
   });
 
+  it("accepts jujinmo reel publishes with its own series labels", () => {
+    const event = normalizeInstagramEvent({
+      account: "jujinmo",
+      media_id: "17890000000000001",
+      permalink: "https://www.instagram.com/reel/example/",
+      caption: "장전 한 장\n오늘 장에서 먼저 볼 세 가지.\n특정 종목의 매수·매도를 권유하지 않습니다.",
+      content_type: "premarket_preview",
+      source_key: "2026-08-25-premarket",
+      quality_review: null,
+      published_at: "2026-08-25T08:05:00+09:00",
+    });
+    expect(event?.status).toBe("published");
+    if (!event || event.status !== "published") throw new Error("expected published event");
+    const message = buildInstagramMessage(event);
+    const embed = message.embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({ author: { name: "주진모? @ju.jin.mo" } });
+    expect(json?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "게시물 유형", value: "장전 한 장" }),
+      ]),
+    );
+  });
+
+  it("builds a red embed for jujinmo scheduled failures", () => {
+    const event = normalizeInstagramEvent({
+      account: "jujinmo",
+      status: "failed",
+      error_type: "RuntimeError",
+      error_message: "게시 설정 미완료: IG_ACCESS_TOKEN",
+      content_type: "close_review",
+      source_key: "2026-08-25-close",
+      stage: "scheduler_preflight",
+      failure_category: "configuration",
+      attempt: 1,
+      next_retry_at: null,
+      occurred_at: "2026-08-25T16:20:00+09:00",
+    });
+    expect(event?.status).toBe("failed");
+    if (!event || event.status !== "failed") throw new Error("expected failure event");
+    const message = buildInstagramMessage(event);
+    const embed = message.embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({ title: "주진모? 자동 게시 실패" });
+  });
+
   it("rejects non-HTTPS preview images", () => {
     expect(
       normalizeInstagramEvent({ ...validPayload, preview_url: "http://example.com/preview.png" }),

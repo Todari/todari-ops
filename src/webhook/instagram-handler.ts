@@ -20,6 +20,12 @@ const ACCOUNTS = {
     profileUrl: "https://www.instagram.com/sector4.f1/",
     color: 0xff2d55,
   },
+  jujinmo: {
+    displayName: "주진모?",
+    handle: "@ju.jin.mo",
+    profileUrl: "https://www.instagram.com/ju.jin.mo/",
+    color: 0x111111,
+  },
 } as const;
 
 type Account = keyof typeof ACCOUNTS;
@@ -69,7 +75,13 @@ const FAILURE_DEDUPE_MS = 6 * 60 * 60 * 1000;
 export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const raw = payload as Record<string, unknown>;
-  if (raw.account !== "jakkuyagu" && raw.account !== "sector4") return null;
+  if (
+    raw.account !== "jakkuyagu" &&
+    raw.account !== "sector4" &&
+    raw.account !== "jujinmo"
+  ) {
+    return null;
+  }
 
   const contentType = optionalString(raw.content_type, 80);
   const sourceKey = optionalString(raw.source_key, 200);
@@ -401,6 +413,9 @@ function contentTypeLabel(value: string, account: Account): string {
     "integration-test": "연동 테스트",
     "interface-preview": "알림 UI 미리보기",
     "daily-content": "야있날 일일 콘텐츠",
+    premarket_preview: "장전 한 장",
+    close_review: "마감 한 장",
+    "jujinmo-scheduled": "주진모 예약 작업",
     "sector4-poller": "섹터4 스케줄러",
     "publish-carousel": "캐러셀 게시",
   };
@@ -417,6 +432,8 @@ function stageLabel(value: string): string {
     naver_preview: "네이버 프리뷰 수집",
     source_snapshot: "사실 스냅샷 검증",
     scheduler_data_probe: "예약 데이터 확인",
+    scheduler_preflight: "예약 작업 사전 점검",
+    scheduled_agent: "예약 에이전트 실행",
     ai_editorial: "AI 초안·편집",
     ai_scene_selection: "AI 장면 선택",
     ai_editorial_release: "AI 편집·출고 검수",
