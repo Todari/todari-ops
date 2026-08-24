@@ -289,10 +289,13 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
   for (const [key, record] of delivered) {
     if (now - record.timestamp > record.ttl) delivered.delete(key);
   }
+  // 실패 키에 errorMessage를 넣지 않는다. 재시도마다 문구가 조금씩 달라지는
+  // 같은 단계·원인의 실패(예: AI 검수 반복 거절)가 폭풍처럼 반복 표시되는 것을 막고,
+  // 단계나 원인 분류가 바뀐 새 실패만 6시간 안에 다시 알린다.
   const dedupeKey =
     event.status === "published"
       ? `published:${event.account}:${event.mediaId}`
-      : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.stage ?? "unknown"}:${event.failureCategory ?? event.errorType}:${event.errorMessage}`;
+      : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.stage ?? "unknown"}:${event.failureCategory ?? event.errorType}`;
   if (delivered.has(dedupeKey)) return false;
 
   const channel = await fetchInstagramChannel();
