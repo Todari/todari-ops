@@ -1,5 +1,5 @@
 import { EmbedBuilder } from "discord.js";
-import { readFile } from "node:fs/promises";
+import { readFile, statfs } from "node:fs/promises";
 import { env } from "../env.js";
 import { fetchAlertsChannel } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
@@ -42,9 +42,23 @@ const MEM_HI = 0.9;
 const MEM_LO = 0.85;
 const SWAP_HI = 0.6;
 const SWAP_LO = 0.45;
+const DISK_HI = 0.9;
+const DISK_LO = 0.82;
 
 let memAlerted = false;
 let swapAlerted = false;
+let diskAlerted = false;
+
+// 컨테이너의 /는 오버레이라 호스트 디스크를 반영하지 않는다. 볼륨으로 마운트된
+// WORK_DIR(/data)은 호스트 루트 파일시스템 위에 있으므로 그 경로로 측정한다.
+const DISK_PROBE_PATH = process.env.WORK_DIR ?? "/data";
+
+// df와 같은 계산: 루트 예약 블록을 제외한 가용(bavail) 기준 사용률.
+export function diskUsage(blocks: number, bfree: number, bavail: number): number {
+  const used = blocks - bfree;
+  const denominator = used + bavail;
+  return denominator > 0 ? used / denominator : 0;
+}
 
 const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const gb = (kb: number) => `${(kb / 1024 / 1024).toFixed(1)}GB`;
@@ -86,6 +100,26 @@ async function check(): Promise<void> {
   } else if (memAlerted && mem < MEM_LO) {
     memAlerted = false;
     await send("✅ 메모리 회복", `사용률 ${pct(mem)}로 내려감.`, 0x22c55e);
+  }
+
+  try {
+    const fs = await statfs(DISK_PROBE_PATH);
+    const disk = diskUsage(Number(fs.blocks), Number(fs.bfree), Number(fs.bavail));
+    const availGb = (Number(fs.bavail) * fs.bsize) / 1024 ** 3;
+    if (!diskAlerted && disk >= DISK_HI) {
+      diskAlerted = true;
+      await send(
+        "🔴 디스크 높음",
+        `루트 파일시스템 사용률 ${pct(disk)} (가용 ${availGb.toFixed(1)}GB). ` +
+          `가득 차면 게시 파이프라인·도커가 멈춤(2026-08-24 사고). 정리 또는 볼륨 확장 필요.`,
+        0xef4444,
+      );
+    } else if (diskAlerted && disk < DISK_LO) {
+      diskAlerted = false;
+      await send("✅ 디스크 회복", `사용률 ${pct(disk)}로 내려감.`, 0x22c55e);
+    }
+  } catch (err) {
+    captureException(err, { kind: "disk-read" });
   }
 
   if (m.swapTotal > 0 && !swapAlerted && swap >= SWAP_HI) {

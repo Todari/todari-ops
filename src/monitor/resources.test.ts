@@ -40,3 +40,12 @@ describe("usage ratios", () => {
     expect(swapUsage({ memTotal: 100, memAvailable: 50, swapTotal: 0, swapFree: 0 })).toBe(0);
   });
 });
+
+describe("diskUsage", () => {
+  it("computes df-style ratio excluding root-reserved blocks", async () => {
+    const { diskUsage } = await import("./resources.js");
+    // 100 blocks, 10 free(5 reserved), 5 avail → used 90 / (90+5) ≈ 0.947
+    expect(diskUsage(100, 10, 5)).toBeCloseTo(90 / 95, 5);
+    expect(diskUsage(0, 0, 0)).toBe(0);
+  });
+});
