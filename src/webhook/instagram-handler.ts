@@ -66,7 +66,13 @@ export interface InstagramFailureEvent {
   occurredAt: string;
 }
 
-export type InstagramEvent = InstagramPostEvent | InstagramFailureEvent;
+export interface InstagramDigestEvent {
+  status: "digest";
+  title: string;
+  body: string;
+}
+
+export type InstagramEvent = InstagramPostEvent | InstagramFailureEvent | InstagramDigestEvent;
 
 const delivered = new Map<string, { timestamp: number; ttl: number }>();
 const SUCCESS_DEDUPE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -75,6 +81,12 @@ const FAILURE_DEDUPE_MS = 6 * 60 * 60 * 1000;
 export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const raw = payload as Record<string, unknown>;
+  if (raw.status === "digest") {
+    const title = boundedString(raw.title, 200, false);
+    const body = boundedString(raw.body, 3_500, false);
+    if (title === null || body === null) return null;
+    return { status: "digest", title, body };
+  }
   if (
     raw.account !== "jakkuyagu" &&
     raw.account !== "sector4" &&
@@ -162,6 +174,18 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
 }
 
 export function buildInstagramMessage(event: InstagramEvent): MessageCreateOptions {
+  if (event.status === "digest") {
+    return {
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x8b7cf0)
+          .setTitle(event.title)
+          .setDescription(truncate(event.body, 3_400))
+          .setFooter({ text: "Instagram 포트폴리오 리포트" })
+          .setTimestamp(new Date()),
+      ],
+    };
+  }
   if (event.status === "failed") return buildFailureMessage(event);
 
   const account = ACCOUNTS[event.account];
@@ -295,7 +319,9 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
   // 같은 단계·원인의 실패(예: AI 검수 반복 거절)가 폭풍처럼 반복 표시되는 것을 막고,
   // 단계나 원인 분류가 바뀐 새 실패만 6시간 안에 다시 알린다.
   const dedupeKey =
-    event.status === "published"
+    event.status === "digest"
+      ? `digest:${event.title}`
+      : event.status === "published"
       ? `published:${event.account}:${event.mediaId}`
       : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.stage ?? "unknown"}:${event.failureCategory ?? event.errorType}`;
   if (delivered.has(dedupeKey)) return false;

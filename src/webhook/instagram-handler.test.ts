@@ -212,3 +212,24 @@ describe("Instagram webhook event", () => {
     ).toBeNull();
   });
 });
+
+describe("portfolio digest events", () => {
+  it("renders a digest embed without account whitelist", () => {
+    const event = normalizeInstagramEvent({
+      status: "digest",
+      title: "주간 인스타 리포트 · 8월 5주",
+      body: "야있날 11→13 팔로워\n섹터4 5→6 팔로워",
+    });
+    expect(event?.status).toBe("digest");
+    if (!event || event.status !== "digest") throw new Error("expected digest");
+    const message = buildInstagramMessage(event);
+    const embed = message.embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({ title: "주간 인스타 리포트 · 8월 5주" });
+  });
+
+  it("rejects digest without title or body", () => {
+    expect(normalizeInstagramEvent({ status: "digest", title: "", body: "x" })).toBeNull();
+    expect(normalizeInstagramEvent({ status: "digest", title: "t" })).toBeNull();
+  });
+});
