@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,8 @@ import requests
 KST = timezone(timedelta(hours=9))
 DEFAULT_HOME = Path("/home/ubuntu")
 DEFAULT_OUTPUT = DEFAULT_HOME / "ops-watchdog" / "instagram-insights.json"
+PERFORMANCE_MINIMUM_POSTS = 5
+PERFORMANCE_CHECKPOINTS = (24, 72)
 BASE_METRICS = (
     "views",
     "reach",
@@ -482,6 +485,11 @@ def _merge_media_samples(
                     "samples": [],
                 },
             )
+            # 구버전 history에도 다음 수집부터 정규 게시/백필 판정을 위한 메타데이터를 채운다.
+            item["series"] = record.get("series")
+            item["tier"] = record.get("tier")
+            item["source_key"] = record.get("source_key")
+            item["published_at"] = record.get("published_at")
             current = [
                 sample
                 for sample in item.get("samples", [])
@@ -523,6 +531,236 @@ def _merge_media_samples(
     return merged
 
 
+def _checkpoint_sample(
+    samples: list[dict[str, Any]], checkpoint_hours: int
+) -> dict[str, Any] | None:
+    """체크포인트를 지난 첫 샘플을 고른다.
+
+    수집기는 하루 한 번 실행되므로 정확히 +24h/+72h인 샘플이 없을 수 있다. 이때
+    체크포인트 이전 값을 당겨 쓰지 않고, 기준을 지난 샘플 가운데 가장 가까운 값을 쓴다.
+    """
+    candidates = [
+        sample
+        for sample in samples
+        if isinstance(sample, dict)
+        and isinstance(sample.get("age_hours"), (int, float))
+        and float(sample["age_hours"]) >= checkpoint_hours
+    ]
+    return min(candidates, key=lambda sample: float(sample["age_hours"])) if candidates else None
+
+
+def _checkpoint_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics = ("reach", "views", "saved", "shares", "total_interactions")
+    totals = {
+        metric: sum(float((sample.get("metrics") or {}).get(metric) or 0) for sample in samples)
+        for metric in metrics
+    }
+    medians = {
+        metric: round(
+            float(statistics.median(
+                float((sample.get("metrics") or {}).get(metric) or 0)
+                for sample in samples
+            )),
+            3,
+        )
+        for metric in ("reach", "views")
+    }
+    reach = totals["reach"]
+    watch = [
+        float((sample.get("rates") or {})["average_watch_seconds"])
+        for sample in samples
+        if isinstance((sample.get("rates") or {}).get("average_watch_seconds"), (int, float))
+    ]
+    return {
+        "posts": len(samples),
+        "median_reach": medians["reach"],
+        "median_views": medians["views"],
+        "saves_per_1000_reach": round(totals["saved"] * 1000 / reach, 2) if reach else 0.0,
+        "shares_per_1000_reach": round(totals["shares"] * 1000 / reach, 2) if reach else 0.0,
+        "interactions_per_1000_reach": round(
+            totals["total_interactions"] * 1000 / reach, 2
+        ) if reach else 0.0,
+        **(
+            {"average_watch_seconds": round(sum(watch) / len(watch), 3)}
+            if watch else {}
+        ),
+    }
+
+
+def _experiment_for(
+    checkpoint: dict[str, Any], account_outcomes: dict[str, Any]
+) -> dict[str, str]:
+    """실적이 충분할 때 한 번에 바꿀 성장 변수 하나만 고른다."""
+    share_save_rate = float(checkpoint.get("saves_per_1000_reach") or 0) + float(
+        checkpoint.get("shares_per_1000_reach") or 0
+    )
+    watch_seconds = checkpoint.get("average_watch_seconds")
+    if share_save_rate == 0:
+        return {
+            "variable": "save_share_value",
+            "reason": "성숙 게시물에서 저장과 공유가 아직 발생하지 않음",
+            "guidance": (
+                "검증된 사실과 기존 레이아웃 안에서 저장하거나 친구에게 보낼 이유가 되는 "
+                "한 가지 요약·질문만 강화하고 다른 구조는 유지한다."
+            ),
+        }
+    if isinstance(watch_seconds, (int, float)) and float(watch_seconds) < 6:
+        return {
+            "variable": "opening_hook",
+            "reason": "릴스 평균 시청 시간이 운영 기준 6초보다 짧음",
+            "guidance": (
+                "첫 3초에 콘텐츠의 질문·긴장·확인할 대상을 먼저 보여주고 이후 장면 순서와 "
+                "검증 사실은 유지한다."
+            ),
+        }
+    if (
+        isinstance(account_outcomes.get("profile_views_1d"), (int, float))
+        and float(account_outcomes["profile_views_1d"]) > 0
+        and isinstance(account_outcomes.get("follower_delta_7d"), int)
+        and int(account_outcomes["follower_delta_7d"]) <= 0
+    ):
+        reason = "최근 프로필 방문은 있었지만 7일 팔로워 증가는 확인되지 않음"
+    else:
+        reason = "초반 시청·공유 신호보다 프로필 전환 약속을 우선 점검할 단계"
+    return {
+        "variable": "follow_promise",
+        "reason": reason,
+        "guidance": (
+            "마지막 장면이나 캡션에서 다음에 무엇을 언제 확인해 주는 계정인지 한 문장으로 "
+            "약속하고 상투적인 팔로우 요청은 쓰지 않는다."
+        ),
+    }
+
+
+def _published_datetime(item: dict[str, Any]) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(item["published_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _growth_eligible_items(
+    account: str, series: str, items: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """백필·재게시 묶음이 정규 시리즈의 성장 기준을 왜곡하지 않게 제외한다."""
+    excluded: set[int] = set()
+    if account == "yaitnal":
+        for item in items:
+            match = re.match(r"(\d{4}-\d{2}-\d{2}):", str(item.get("source_key") or ""))
+            published = _published_datetime(item)
+            if not match or published is None:
+                continue
+            event_date = datetime.fromisoformat(match.group(1)).date()
+            if (published.astimezone(KST).date() - event_date).days > 1:
+                excluded.add(id(item))
+    elif account == "sector4":
+        by_publish_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in items:
+            published = _published_datetime(item)
+            if published is not None:
+                by_publish_date[published.astimezone(KST).date().isoformat()].append(item)
+        # 한 세션 유형이 하루에 세 편 이상 올라오면 과거 라운드 백필 묶음이다.
+        for same_day in by_publish_date.values():
+            if len(same_day) >= 3:
+                excluded.update(id(item) for item in same_day)
+    eligible = [item for item in items if id(item) not in excluded]
+    return eligible, len(excluded)
+
+
+def build_performance_feedback(
+    latest: dict[str, Any], media_samples: dict[str, Any], *, generated_at: str,
+    history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """실제 반응을 다음 생성기가 읽을 수 있는 계정·시리즈별 컨텍스트로 바꾼다."""
+    feedback: dict[str, Any] = {}
+    generated_date = datetime.fromisoformat(generated_at).date()
+    baseline_date = generated_date - timedelta(days=7)
+    for account, account_samples in media_samples.items():
+        if not isinstance(account_samples, dict):
+            continue
+        by_series: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in account_samples.values():
+            if not isinstance(item, dict) or not isinstance(item.get("series"), str):
+                continue
+            by_series[item["series"]].append(item)
+        latest_account = (latest.get("accounts") or {}).get(account) or {}
+        profile = latest_account.get("profile") or {}
+        baseline_entry = max(
+            (
+                entry
+                for entry in (history or [])
+                if isinstance(entry, dict)
+                and str(entry.get("date") or entry.get("collected_at") or "")[:10]
+                <= baseline_date.isoformat()
+            ),
+            key=lambda entry: str(entry.get("date") or entry.get("collected_at") or "")[:10],
+            default=None,
+        )
+        baseline_followers = None
+        if baseline_entry:
+            baseline_followers = (
+                (((baseline_entry.get("accounts") or {}).get(account) or {}).get("profile") or {})
+                .get("followers_count")
+            )
+        followers = profile.get("followers_count")
+        account_metrics = (latest_account.get("account_metrics") or {}).get("metrics") or {}
+        account_outcomes = {
+            "profile_views_1d": account_metrics.get("profile_views"),
+            "followers": followers,
+            "follower_delta_7d": (
+                int(followers) - int(baseline_followers)
+                if isinstance(followers, int) and isinstance(baseline_followers, int)
+                else None
+            ),
+            "attribution": "account_level_not_per_post",
+        }
+        series_feedback = {}
+        for series, items in sorted(by_series.items()):
+            items, excluded_backfill_posts = _growth_eligible_items(
+                account, series, items
+            )
+            checkpoints = {}
+            for checkpoint in PERFORMANCE_CHECKPOINTS:
+                samples = [
+                    sample
+                    for item in items
+                    if (sample := _checkpoint_sample(item.get("samples") or [], checkpoint))
+                    is not None
+                ]
+                checkpoints[f"{checkpoint}h"] = _checkpoint_summary(samples) if samples else {
+                    "posts": 0
+                }
+            mature = checkpoints["24h"]
+            eligible = int(mature.get("posts") or 0) >= PERFORMANCE_MINIMUM_POSTS
+            series_feedback[series] = {
+                "status": "ready" if eligible else "collecting",
+                "minimum_posts": PERFORMANCE_MINIMUM_POSTS,
+                "excluded_backfill_posts": excluded_backfill_posts,
+                "checkpoints": checkpoints,
+                "experiment": _experiment_for(mature, account_outcomes) if eligible else {
+                    "variable": "observe",
+                    "reason": (
+                        f"24시간 성과 {mature.get('posts', 0)}건 수집 · "
+                        f"최소 {PERFORMANCE_MINIMUM_POSTS}건 필요"
+                    ),
+                    "guidance": "기존 계약과 문체를 유지하고 성과 표본을 더 수집한다.",
+                },
+            }
+        feedback[account] = {
+            "generated_at": generated_at,
+            "handle": latest_account.get("handle"),
+            "followers": profile.get("followers_count"),
+            "account_outcomes": account_outcomes,
+            "policy": {
+                "facts_are_not_content_sources": True,
+                "one_experiment_variable_at_a_time": True,
+                "minimum_posts": PERFORMANCE_MINIMUM_POSTS,
+            },
+            "series": series_feedback,
+        }
+    return feedback
+
+
 def collect_portfolio(
     *,
     home: Path = DEFAULT_HOME,
@@ -558,11 +796,19 @@ def collect_portfolio(
                 "error": f"{type(error).__name__}: {error}",
             }
     previous = _json(output) if output.is_file() else {}
+    history = _merge_history(previous, latest)
+    media_samples = _merge_media_samples(previous, latest)
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "latest": latest,
-        "history": _merge_history(previous, latest),
-        "media_samples": _merge_media_samples(previous, latest),
+        "history": history,
+        "media_samples": media_samples,
+        "performance_feedback": build_performance_feedback(
+            latest,
+            media_samples,
+            generated_at=latest["collected_at"],
+            history=history,
+        ),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")

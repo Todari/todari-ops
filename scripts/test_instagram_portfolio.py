@@ -176,6 +176,147 @@ class InstagramPortfolioTest(unittest.TestCase):
         samples = payload["media_samples"]["jujinmo"]["media-1"]["samples"]
         self.assertEqual(len(samples), 1)
         self.assertEqual(samples[0]["metrics"]["reach"], 80)
+        self.assertEqual(payload["schema_version"], 3)
+        feedback = payload["performance_feedback"]["jujinmo"]["series"][
+            "premarket_hypothesis"
+        ]
+        self.assertEqual(feedback["status"], "collecting")
+        self.assertEqual(feedback["experiment"]["variable"], "observe")
+
+    def test_performance_feedback_uses_mature_checkpoint_and_one_experiment(self):
+        latest = {
+            "accounts": {
+                "yaitnal": {
+                    "handle": "yaitnal",
+                    "profile": {"followers_count": 11},
+                    "account_metrics": {"metrics": {"profile_views": 3}},
+                }
+            }
+        }
+        media_samples = {"yaitnal": {}}
+        for index in range(5):
+            media_samples["yaitnal"][f"media-{index}"] = {
+                "series": "flow-reel",
+                "samples": [
+                    {
+                        "age_hours": 23.0,
+                        "metrics": {"reach": 999, "views": 999},
+                        "rates": {"average_watch_seconds": 12.0},
+                    },
+                    {
+                        "age_hours": 25.0,
+                        "metrics": {
+                            "reach": 100 + index,
+                            "views": 120 + index,
+                            "saved": 0,
+                            "shares": 0,
+                            "total_interactions": 2,
+                        },
+                        "rates": {"average_watch_seconds": 7.0},
+                    },
+                    {
+                        "age_hours": 74.0,
+                        "metrics": {
+                            "reach": 150 + index,
+                            "views": 180 + index,
+                            "saved": 0,
+                            "shares": 1,
+                            "total_interactions": 3,
+                        },
+                        "rates": {"average_watch_seconds": 7.5},
+                    },
+                ],
+            }
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest,
+            media_samples,
+            generated_at="2026-08-31T00:00:00+00:00",
+            history=[{
+                "date": "2026-08-24",
+                "accounts": {"yaitnal": {"profile": {"followers_count": 10}}},
+            }],
+        )["yaitnal"]
+
+        series_feedback = feedback["series"]["flow-reel"]
+
+        self.assertEqual(series_feedback["status"], "ready")
+        self.assertEqual(series_feedback["checkpoints"]["24h"]["posts"], 5)
+        self.assertEqual(series_feedback["checkpoints"]["24h"]["median_reach"], 102.0)
+        self.assertEqual(series_feedback["checkpoints"]["72h"]["posts"], 5)
+        self.assertEqual(series_feedback["experiment"]["variable"], "save_share_value")
+        self.assertEqual(feedback["account_outcomes"]["follower_delta_7d"], 1)
+
+    def test_performance_feedback_excludes_sector4_backfill_batch(self):
+        latest = {
+            "accounts": {
+                "sector4": {
+                    "handle": "sector4.f1",
+                    "profile": {"followers_count": 5},
+                }
+            }
+        }
+        media_samples = {"sector4": {}}
+        for index in range(5):
+            media_samples["sector4"][f"media-{index}"] = {
+                "series": "race-replay-reel",
+                "published_at": f"2026-08-25T1{index}:00:00+09:00",
+                "samples": [{
+                    "age_hours": 30,
+                    "metrics": {"reach": 100, "views": 120},
+                    "rates": {"average_watch_seconds": 5.0},
+                }],
+            }
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest,
+            media_samples,
+            generated_at="2026-08-31T00:00:00+00:00",
+        )["sector4"]["series"]["race-replay-reel"]
+
+        self.assertEqual(feedback["excluded_backfill_posts"], 5)
+        self.assertEqual(feedback["checkpoints"]["24h"]["posts"], 0)
+        self.assertEqual(feedback["status"], "collecting")
+
+    def test_performance_feedback_excludes_late_yaitnal_backfill(self):
+        latest = {
+            "accounts": {
+                "yaitnal": {"handle": "yaitnal", "profile": {"followers_count": 11}}
+            }
+        }
+        media_samples = {
+            "yaitnal": {
+                "backfill": {
+                    "series": "flow-reel",
+                    "source_key": "2026-08-23:flow-reel:game",
+                    "published_at": "2026-08-25T16:00:00+09:00",
+                    "samples": [{
+                        "age_hours": 30,
+                        "metrics": {"reach": 200, "views": 220},
+                        "rates": {"average_watch_seconds": 8.0},
+                    }],
+                },
+                "regular": {
+                    "series": "flow-reel",
+                    "source_key": "2026-08-24:flow-reel:game",
+                    "published_at": "2026-08-25T01:00:00+09:00",
+                    "samples": [{
+                        "age_hours": 30,
+                        "metrics": {"reach": 100, "views": 120},
+                        "rates": {"average_watch_seconds": 7.0},
+                    }],
+                },
+            }
+        }
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest,
+            media_samples,
+            generated_at="2026-08-31T00:00:00+00:00",
+        )["yaitnal"]["series"]["flow-reel"]
+
+        self.assertEqual(feedback["excluded_backfill_posts"], 1)
+        self.assertEqual(feedback["checkpoints"]["24h"]["posts"], 1)
 
 
 if __name__ == "__main__":

@@ -613,6 +613,7 @@ def weekly_digest_once(state: dict, now: datetime) -> None:
         return
     data = json.loads(INSIGHTS_PATH.read_text(encoding="utf-8"))
     latest = data["latest"]["accounts"]
+    performance_feedback = data.get("performance_feedback") or {}
     history = data.get("history") or []
     week_ago = (now - timedelta(days=7)).date().isoformat()
     baseline = next(
@@ -656,6 +657,18 @@ def weekly_digest_once(state: dict, now: datetime) -> None:
                 f"  ↳ 이번 주 최고 도달: {top.get('series', '?')} · "
                 f"도달 {top['metrics']['reach']} · {top.get('permalink', '')}"
             )
+        ready_experiments = []
+        for series, item in (
+            ((performance_feedback.get(name) or {}).get("series") or {}).items()
+        ):
+            if item.get("status") != "ready":
+                continue
+            experiment = item.get("experiment") or {}
+            ready_experiments.append(
+                f"{series}={experiment.get('variable', 'observe')}"
+            )
+        if ready_experiments:
+            lines.append("  ↳ 다음 실험: " + " · ".join(ready_experiments[:3]))
     title = f"주간 인스타 리포트 · {week_key}"
     if _notify_digest(title, "\n".join(lines)):
         state["_instagram_weekly_digest"] = week_key
