@@ -583,6 +583,85 @@ def collect_portfolio_once(state: dict, now: datetime) -> None:
     )
 
 
+def _notify_digest(title: str, body: str) -> bool:
+    env = _env(HOME / "jujinmo" / ".env")
+    url = env.get("INSTAGRAM_NOTIFY_URL", "")
+    secret = env.get("INSTAGRAM_NOTIFY_SECRET", "")
+    if not url or not secret:
+        return False
+    payload = {"status": "digest", "title": title, "body": body}
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(secret.encode(), data, hashlib.sha256).hexdigest()
+    response = requests.post(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "X-Instagram-Signature": signature},
+        timeout=15,
+    )
+    return response.ok
+
+
+def weekly_digest_once(state: dict, now: datetime) -> None:
+    """일요일 21시 수집 뒤 한 번, 세 계정 성장·성과 요약을 디스코드로 보낸다."""
+    week_key = f"{now.isocalendar().year}-w{now.isocalendar().week:02d}"
+    if (
+        now.weekday() != 6
+        or now.hour < 21
+        or state.get("_instagram_weekly_digest") == week_key
+        or state.get("_instagram_insights_date") != now.date().isoformat()
+    ):
+        return
+    data = json.loads(INSIGHTS_PATH.read_text(encoding="utf-8"))
+    latest = data["latest"]["accounts"]
+    history = data.get("history") or []
+    week_ago = (now - timedelta(days=7)).date().isoformat()
+    baseline = next(
+        (
+            entry
+            for entry in history
+            if str(entry.get("collected_at") or entry.get("date") or "")[:10] <= week_ago
+        ),
+        None,
+    )
+    lines = []
+    for name, account in latest.items():
+        if account.get("error"):
+            lines.append(f"**{name}** — 수집 실패")
+            continue
+        profile = account.get("profile") or {}
+        followers = profile.get("followers_count")
+        delta = ""
+        if baseline:
+            base_profile = (
+                (baseline.get("accounts") or {}).get(name) or {}
+            ).get("profile") or {}
+            base_followers = base_profile.get("followers_count")
+            if isinstance(base_followers, int) and isinstance(followers, int):
+                delta = f" ({followers - base_followers:+d})"
+        metrics = (account.get("account_metrics") or {}).get("metrics") or {}
+        lines.append(
+            f"**{account.get('handle', name)}** — 팔로워 {followers}{delta} · "
+            f"게시물 {profile.get('media_count')} · "
+            f"일간 조회 {metrics.get('views', '—')} · 도달 {metrics.get('reach', '—')}"
+        )
+        records = [
+            record
+            for record in account.get("records") or []
+            if str(record.get("published_at") or "")[:10] >= week_ago
+            and isinstance((record.get("metrics") or {}).get("reach"), (int, float))
+        ]
+        if records:
+            top = max(records, key=lambda record: record["metrics"]["reach"])
+            lines.append(
+                f"  ↳ 이번 주 최고 도달: {top.get('series', '?')} · "
+                f"도달 {top['metrics']['reach']} · {top.get('permalink', '')}"
+            )
+    title = f"주간 인스타 리포트 · {week_key}"
+    if _notify_digest(title, "\n".join(lines)):
+        state["_instagram_weekly_digest"] = week_key
+        print(f"주간 다이제스트 발송: {week_key}")
+
+
 def main() -> None:
     now = datetime.now(KST)
     state = _load_state()
@@ -606,6 +685,10 @@ def main() -> None:
         collect_portfolio_once(state, now)
     except Exception as error:  # 성과 수집 실패가 게시 침묵 감시를 막지 않는다.
         print(f"warning: Insights 수집 실패 — {type(error).__name__}: {error}")
+    try:
+        weekly_digest_once(state, now)
+    except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
+        print(f"warning: 주간 다이제스트 실패 — {type(error).__name__}: {error}")
     _save_state(state)
     ledger.close()
 
