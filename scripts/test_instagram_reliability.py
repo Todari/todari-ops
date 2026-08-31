@@ -80,6 +80,31 @@ class ReliabilityLedgerTest(unittest.TestCase):
             self.assertIsNone(item["next_recovery_at"])
             ledger.close()
 
+    def test_ineligible_job_can_be_resolved_as_cancelled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            now = datetime(2026, 8, 31, 1, 0, tzinfo=UTC)
+            ledger.sync(
+                job_id="jakkuyagu:flow-reel:no-video",
+                account="jakkuyagu",
+                content_type="game-flow-reel",
+                source_key="no-video",
+                expected_at=now - timedelta(hours=1),
+                due_at=now,
+                published=False,
+                now=now,
+            )
+
+            item = ledger.cancel(
+                "jakkuyagu:flow-reel:no-video",
+                detail="verified source video unavailable",
+                now=now,
+            )
+
+            self.assertEqual(item["status"], "cancelled")
+            self.assertEqual(ledger.unresolved(), [])
+            ledger.close()
+
 
 if __name__ == "__main__":
     unittest.main()

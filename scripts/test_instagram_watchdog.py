@@ -27,6 +27,30 @@ KST = timezone(timedelta(hours=9))
 
 
 class InstagramWatchdogTest(unittest.TestCase):
+    def test_graph_only_flow_is_not_scheduled_as_a_reel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "graph-only.json"
+            manifest = root / "carousel.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "clips": [],
+                        "verification": {
+                            "release_fallback": {"mode": "verified_relay_graph_only"}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest.write_text(
+                json.dumps({"game_config": str(config)}), encoding="utf-8"
+            )
+
+            self.assertFalse(
+                watchdog._flow_has_reel_source({"manifest_path": str(manifest)})
+            )
+
     def test_flush_outbox_removes_success_and_keeps_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

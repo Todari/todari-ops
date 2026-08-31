@@ -345,6 +345,13 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
                 permalink=reel.get("permalink"),
                 now=now,
             )
+            if flow_published and not _flow_has_reel_source(flow):
+                reel_state = ledger.cancel(
+                    reel_job,
+                    detail="검증된 영상 소스가 없어 그래프 캐러셀만 출고됨",
+                    now=now,
+                )
+                state.pop(reel_job, None)
             for job_id, item, content_type in (
                 (flow_job, flow_state, "flow"),
                 (reel_job, reel_state, "game-flow-reel"),
@@ -398,6 +405,30 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             cwd=HOME / "jakkuyagu",
             timeout=2700,
         )
+
+
+def _flow_has_reel_source(flow: dict) -> bool:
+    """Return false only when an existing manifest explicitly has no verified clips."""
+    value = flow.get("manifest_path")
+    if not value:
+        return True
+    manifest_path = Path(str(value))
+    if not manifest_path.is_file():
+        return True
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        config_value = manifest.get("game_config")
+        if not config_value:
+            return True
+        config_path = Path(str(config_value))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    fallback = (config.get("verification") or {}).get("release_fallback") or {}
+    return not (
+        not config.get("clips")
+        and str(fallback.get("mode", "")).endswith("graph_only")
+    )
 
 
 def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> None:

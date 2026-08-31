@@ -59,7 +59,9 @@ class ReliabilityLedger:
         current = self.get(job_id)
         if published:
             status = "published"
-        elif current and current["status"] in {"recovering", "operator_required"}:
+        elif current and current["status"] in {
+            "recovering", "operator_required", "cancelled",
+        }:
             status = current["status"]
         elif now >= due_at:
             status = "missing"
@@ -160,6 +162,28 @@ class ReliabilityLedger:
                 now.isoformat(),
                 job_id,
             ),
+        )
+        self.connection.commit()
+        return self.get(job_id) or {}
+
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        detail: str,
+        now: datetime | None = None,
+    ) -> dict:
+        now = now or datetime.now(timezone.utc)
+        if not self.get(job_id):
+            raise KeyError(job_id)
+        self.connection.execute(
+            """
+            UPDATE jobs
+            SET status='cancelled', last_error=?, next_recovery_at=NULL,
+                updated_at=?, resolved_at=?
+            WHERE job_id=?
+            """,
+            (detail[:1000], now.isoformat(), now.isoformat(), job_id),
         )
         self.connection.commit()
         return self.get(job_id) or {}
