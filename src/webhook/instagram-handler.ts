@@ -203,7 +203,9 @@ export function buildInstagramMessage(event: InstagramEvent): MessageCreateOptio
       },
       {
         name: "다음 생성에서 개선",
-        value: truncate(event.qualityReview.improvements.map((item) => `• ${item}`).join("\n"), 900),
+        value: event.qualityReview.improvements.length
+          ? truncate(event.qualityReview.improvements.map((item) => `• ${item}`).join("\n"), 900)
+          : "승인 기준에서 추가 개선점 없음",
         inline: true,
       },
     );
@@ -343,8 +345,10 @@ function optionalQualityReview(value: unknown): InstagramQualityReview | null | 
     raw.overall_score < 0 || raw.overall_score > 100
   ) return undefined;
   const summary = boundedString(raw.summary, 800, false);
-  const strengths = boundedStringArray(raw.strengths, 3, 500);
-  const improvements = boundedStringArray(raw.improvements, 3, 500);
+  const strengths = boundedStringArray(raw.strengths, 3, 500, 1);
+  // A high-scoring review can legitimately have no requested improvements.
+  // Rejecting [] made an otherwise successful Sector4 post return HTTP 400.
+  const improvements = boundedStringArray(raw.improvements, 3, 500, 0);
   if (summary === null || strengths === null || improvements === null) return undefined;
   if (!raw.scores || typeof raw.scores !== "object" || Array.isArray(raw.scores)) return undefined;
   const scores: Record<string, number> = {};
@@ -366,9 +370,14 @@ function optionalQualityReview(value: unknown): InstagramQualityReview | null | 
   };
 }
 
-function boundedStringArray(value: unknown, maxItems: number, maxLength: number): string[] | null {
+function boundedStringArray(
+  value: unknown,
+  maxItems: number,
+  maxLength: number,
+  minItems = 1,
+): string[] | null {
   if (
-    !Array.isArray(value) || value.length < 1 || value.length > maxItems ||
+    !Array.isArray(value) || value.length < minItems || value.length > maxItems ||
     value.some((item) => boundedString(item, maxLength, false) === null)
   ) return null;
   return value as string[];
@@ -417,7 +426,12 @@ function contentTypeLabel(value: string, account: Account): string {
     "interface-preview": "알림 UI 미리보기",
     "daily-content": "야있날 일일 콘텐츠",
     premarket_preview: "장전 한 장",
+    premarket_hypothesis: "장전 근거 분석",
     close_review: "마감 한 장",
+    close_explainer: "장 마감 근거 분석",
+    weekly_market_review: "주간 시장 리뷰",
+    market_term_explainer: "주식 용어 설명",
+    weekly_market_outlook: "다음 주 시장 전망",
     "jujinmo-scheduled": "주진모 예약 작업",
     "sector4-poller": "섹터4 스케줄러",
     "publish-carousel": "캐러셀 게시",

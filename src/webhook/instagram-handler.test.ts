@@ -83,6 +83,35 @@ describe("Instagram webhook event", () => {
     expect(event.qualityReview).toBeNull();
   });
 
+  it("accepts an approved quality review with no improvements", () => {
+    const event = normalizeInstagramEvent({
+      ...validPayload,
+      account: "sector4",
+      quality_review: {
+        audience: "f1_fan",
+        overall_score: 94,
+        scores: { factual_trust: 95, fan_interest: 94 },
+        summary: "사실과 레이스 맥락을 충분히 전달했습니다.",
+        strengths: ["전체 순위와 주요 변화를 함께 보여줍니다."],
+        improvements: [],
+      },
+    });
+
+    expect(event?.status).toBe("published");
+    if (!event || event.status !== "published") throw new Error("expected published event");
+    const message = buildInstagramMessage(event);
+    const embed = message.embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "다음 생성에서 개선",
+          value: "승인 기준에서 추가 개선점 없음",
+        }),
+      ]),
+    );
+  });
+
   it("accepts jujinmo reel publishes with its own series labels", () => {
     const event = normalizeInstagramEvent({
       account: "jujinmo",

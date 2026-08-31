@@ -164,6 +164,24 @@ server {
 }
 ```
 
+### Instagram 포트폴리오 운영 지표
+
+EC2 호스트의 `scripts/instagram-watchdog.py`는 게시 침묵 실패를 감시하고, 매일 KST 21시
+이후 한 번 `scripts/instagram_portfolio.py`를 실행한다. 야있날·섹터4·주진모의 최근 14일
+게시물을 같은 스키마로 수집해 `/home/ubuntu/ops-watchdog/instagram-insights.json`에 저장한다.
+
+- 각 계정 토큰은 해당 `/home/ubuntu/<repo>/.env`에서 읽으며 결과 파일에 기록하지 않는다.
+- 게시물 조회·도달·저장·공유·반응·릴스 평균 시청 시간과 계정 프로필 조회·팔로워 수를 수집한다.
+- 핵심 포맷과 보조 포맷을 분리하고 도달 1,000명당 저장·공유·반응을 계산한다.
+- 포맷별 게시물당 평균·중앙값과 게시물별 35일 스냅샷을 유지해 +24시간/+7일 성과를 비교한다.
+- 35일치 계정·포맷 요약을 유지해 대표 포맷을 감이 아니라 누적 성과로 고를 수 있게 한다.
+
+호스트 설치 또는 갱신:
+
+```bash
+EC2_HOST=ubuntu@<ip> SSH_KEY=~/.ssh/key.pem ./deploy/install-instagram-watchdog.sh
+```
+
 ## Docker 배포
 
 ```bash
