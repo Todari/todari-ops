@@ -247,6 +247,235 @@ class InstagramPortfolioTest(unittest.TestCase):
         self.assertEqual(series_feedback["experiment"]["variable"], "save_share_value")
         self.assertEqual(feedback["account_outcomes"]["follower_delta_7d"], 1)
 
+    def _reel_samples(self, series, *, count=5, reach=100, watch=3.0, saved=0, shares=0):
+        return {
+            f"{series}-{index}": {
+                "series": series,
+                "media_product_type": "REELS",
+                "samples": [{
+                    "age_hours": 26.0,
+                    "metrics": {
+                        "reach": reach + index, "views": reach + 10 + index,
+                        "saved": saved, "shares": shares, "total_interactions": 1,
+                    },
+                    "rates": {"average_watch_seconds": watch + index * 0.1},
+                }],
+            }
+            for index in range(count)
+        }
+
+    def _feed_samples(self, series, *, count=5, reach=5):
+        return {
+            f"{series}-{index}": {
+                "series": series,
+                "media_product_type": "FEED",
+                "samples": [{
+                    "age_hours": 26.0,
+                    "metrics": {"reach": reach, "views": reach * 3, "saved": 0, "shares": 0},
+                    "rates": {},
+                }],
+            }
+            for index in range(count)
+        }
+
+    def test_short_watch_reels_choose_opening_hook_and_report_retention_proxy(self):
+        latest = {
+            "accounts": {
+                "jujinmo": {
+                    "handle": "ju.jin.mo",
+                    "profile": {"followers_count": 1},
+                    "account_metrics": {"metrics": {"profile_views": 2, "reach": 210}},
+                }
+            }
+        }
+        media_samples = {"jujinmo": self._reel_samples("close_explainer", reach=40, watch=3.0)}
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest, media_samples, generated_at="2026-09-02T12:00:00+00:00",
+        )["jujinmo"]
+
+        series = feedback["series"]["close_explainer"]
+        self.assertEqual(series["format"], "reel")
+        self.assertEqual(series["experiment"]["variable"], "opening_hook")
+        self.assertIn("15초", series["experiment"]["guidance"])
+        self.assertEqual(series["checkpoints"]["24h"]["median_watch_seconds"], 3.2)
+        self.assertEqual(series["checkpoints"]["24h"]["watch_under_4s_share"], 1.0)
+        self.assertEqual(feedback["account_outcomes"]["profile_visits_per_1000_reach"], 9.52)
+        self.assertEqual(feedback["pause_candidates"], [])
+
+    def test_visit_rate_is_withheld_when_daily_reach_is_too_small(self):
+        latest = {
+            "accounts": {
+                "sector4": {
+                    "handle": "sector4.f1",
+                    "profile": {"followers_count": 5},
+                    "account_metrics": {"metrics": {"profile_views": 1, "reach": 4}},
+                }
+            }
+        }
+
+        outcomes = instagram_portfolio.build_performance_feedback(
+            latest, {"sector4": {}}, generated_at="2026-09-02T12:00:00+00:00",
+        )["sector4"]["account_outcomes"]
+
+        self.assertIsNone(outcomes["profile_visits_per_1000_reach"])
+        self.assertEqual(outcomes["reach_1d"], 4)
+
+    def test_low_profile_visit_rate_chooses_follow_promise_before_save_share(self):
+        latest = {
+            "accounts": {
+                "yaitnal": {
+                    "handle": "yaitnal",
+                    "profile": {"followers_count": 11},
+                    "account_metrics": {"metrics": {"profile_views": 1, "reach": 667}},
+                }
+            }
+        }
+        media_samples = {"yaitnal": self._reel_samples("flow-reel", reach=140, watch=7.0)}
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest, media_samples, generated_at="2026-09-02T12:00:00+00:00",
+        )["yaitnal"]
+
+        self.assertEqual(feedback["account_outcomes"]["profile_visits_per_1000_reach"], 1.5)
+        self.assertEqual(
+            feedback["series"]["flow-reel"]["experiment"]["variable"], "follow_promise"
+        )
+
+    def test_healthy_visit_rate_but_no_saves_chooses_save_share_value(self):
+        latest = {
+            "accounts": {
+                "yaitnal": {
+                    "handle": "yaitnal",
+                    "profile": {"followers_count": 11},
+                    "account_metrics": {"metrics": {"profile_views": 5, "reach": 600}},
+                }
+            }
+        }
+        media_samples = {"yaitnal": self._reel_samples("flow-reel", reach=140, watch=7.0)}
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest, media_samples, generated_at="2026-09-02T12:00:00+00:00",
+        )["yaitnal"]
+
+        self.assertEqual(
+            feedback["series"]["flow-reel"]["experiment"]["variable"], "save_share_value"
+        )
+
+    def test_feed_series_reaching_only_followers_becomes_pause_candidate(self):
+        latest = {
+            "accounts": {
+                "yaitnal": {
+                    "handle": "yaitnal",
+                    "profile": {"followers_count": 30},
+                    "account_metrics": {"metrics": {"profile_views": 5, "reach": 600}},
+                }
+            }
+        }
+        media_samples = {
+            "yaitnal": {
+                **self._feed_samples("preview", reach=25),
+                **self._reel_samples("flow-reel", reach=140, watch=7.0, saved=1),
+            }
+        }
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest, media_samples, generated_at="2026-09-02T12:00:00+00:00",
+        )["yaitnal"]
+
+        preview = feedback["series"]["preview"]
+        self.assertEqual(preview["format"], "feed")
+        self.assertEqual(preview["experiment"]["variable"], "pause_series")
+        self.assertIn("팔로워 30명", preview["experiment"]["reason"])
+        self.assertEqual(
+            [item["series"] for item in feedback["pause_candidates"]], ["preview"]
+        )
+        self.assertEqual(feedback["pause_candidates"][0]["median_reach"], 25.0)
+        self.assertNotEqual(
+            feedback["series"]["flow-reel"]["experiment"]["variable"], "pause_series"
+        )
+
+    def test_reel_series_with_median_reach_under_20_is_paused_by_kill_rule(self):
+        latest = {
+            "accounts": {
+                "jujinmo": {
+                    "handle": "ju.jin.mo",
+                    "profile": {"followers_count": 1},
+                    "account_metrics": {"metrics": {"profile_views": 2, "reach": 21}},
+                }
+            }
+        }
+        media_samples = {"jujinmo": self._reel_samples("premarket_hypothesis", reach=6, watch=1.0)}
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest, media_samples, generated_at="2026-09-02T12:00:00+00:00",
+        )["jujinmo"]
+
+        experiment = feedback["series"]["premarket_hypothesis"]["experiment"]
+        self.assertEqual(experiment["variable"], "pause_series")
+        self.assertIn("< 20", experiment["reason"])
+        self.assertEqual(feedback["pause_candidates"][0]["posts"], 5)
+
+    def test_legacy_samples_without_product_type_are_classified_by_watch_time(self):
+        reel_items = self._reel_samples("race-replay-reel", reach=100, watch=6.0)
+        for item in reel_items.values():
+            del item["media_product_type"]
+        feed_items = self._feed_samples("quali", reach=50)
+        for item in feed_items.values():
+            del item["media_product_type"]
+        latest = {
+            "accounts": {
+                "sector4": {
+                    "handle": "sector4.f1",
+                    "profile": {"followers_count": 5},
+                    "account_metrics": {"metrics": {"profile_views": 4, "reach": 400}},
+                }
+            }
+        }
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest, {"sector4": {**reel_items, **feed_items}},
+            generated_at="2026-09-02T12:00:00+00:00",
+        )["sector4"]
+
+        self.assertEqual(feedback["series"]["race-replay-reel"]["format"], "reel")
+        self.assertEqual(feedback["series"]["quali"]["format"], "feed")
+
+    def test_follower_delta_falls_back_to_shortest_available_window(self):
+        latest = {
+            "accounts": {
+                "yaitnal": {"handle": "yaitnal", "profile": {"followers_count": 13}}
+            }
+        }
+        history = [
+            {"date": "2026-08-31", "accounts": {"yaitnal": {"profile": {"followers_count": 11}}}},
+            {"date": "2026-09-01", "accounts": {"yaitnal": {"profile": {"followers_count": 12}}}},
+        ]
+
+        outcomes = instagram_portfolio.build_performance_feedback(
+            latest, {"yaitnal": {}}, generated_at="2026-09-02T12:00:00+00:00",
+            history=history,
+        )["yaitnal"]["account_outcomes"]
+
+        self.assertEqual(outcomes["follower_delta_7d"], 2)
+        self.assertEqual(outcomes["follower_delta_window_days"], 2)
+        self.assertIsNone(outcomes["profile_visits_per_1000_reach"])
+
+    def test_summary_exposes_median_watch_and_short_watch_share(self):
+        records = [
+            {
+                "tier": "core", "series": "close_explainer",
+                "metrics": {"reach": 10, "views": 12},
+                "rates": {"average_watch_seconds": watch},
+            }
+            for watch in (1.5, 3.9, 5.0)
+        ]
+
+        summary = instagram_portfolio.summarize(records)[0]["per_post"]
+
+        self.assertEqual(summary["median_watch_seconds"], 3.9)
+        self.assertEqual(summary["watch_under_4s_share"], 0.667)
+
     def test_performance_feedback_excludes_sector4_backfill_batch(self):
         latest = {
             "accounts": {

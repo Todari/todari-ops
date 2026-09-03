@@ -612,6 +612,15 @@ def weekly_digest_once(state: dict, now: datetime) -> None:
     ):
         return
     data = json.loads(INSIGHTS_PATH.read_text(encoding="utf-8"))
+    lines = build_weekly_digest_lines(data, now)
+    title = f"주간 인스타 리포트 · {week_key}"
+    if _notify_digest(title, "\n".join(lines)):
+        state["_instagram_weekly_digest"] = week_key
+        print(f"주간 다이제스트 발송: {week_key}")
+
+
+def build_weekly_digest_lines(data: dict, now: datetime) -> list[str]:
+    """insights 파일에서 계정별 성장·퍼널·실험·중단 후보 요약 줄을 만든다(순수 함수)."""
     latest = data["latest"]["accounts"]
     performance_feedback = data.get("performance_feedback") or {}
     history = data.get("history") or []
@@ -645,6 +654,25 @@ def weekly_digest_once(state: dict, now: datetime) -> None:
             f"게시물 {profile.get('media_count')} · "
             f"일간 조회 {metrics.get('views', '—')} · 도달 {metrics.get('reach', '—')}"
         )
+        account_feedback = performance_feedback.get(name) or {}
+        outcomes = account_feedback.get("account_outcomes") or {}
+        visit_rate = outcomes.get("profile_visits_per_1000_reach")
+        funnel_parts = []
+        if isinstance(visit_rate, (int, float)):
+            funnel_parts.append(
+                f"도달 1,000당 프로필 방문 {visit_rate:g} (방문 {outcomes.get('profile_views_1d', '—')})"
+            )
+        elif isinstance(outcomes.get("profile_views_1d"), (int, float)):
+            funnel_parts.append(
+                f"프로필 방문 {outcomes['profile_views_1d']} (도달 {outcomes.get('reach_1d', '—')}, 비율 표본 부족)"
+            )
+        if isinstance(outcomes.get("follower_delta_7d"), int):
+            funnel_parts.append(
+                f"팔로워 {outcomes['follower_delta_7d']:+d} "
+                f"({outcomes.get('follower_delta_window_days', '?')}일 창)"
+            )
+        if funnel_parts:
+            lines.append("  ↳ 퍼널: " + " · ".join(funnel_parts))
         records = [
             record
             for record in account.get("records") or []
@@ -658,21 +686,28 @@ def weekly_digest_once(state: dict, now: datetime) -> None:
                 f"도달 {top['metrics']['reach']} · {top.get('permalink', '')}"
             )
         ready_experiments = []
-        for series, item in (
-            ((performance_feedback.get(name) or {}).get("series") or {}).items()
-        ):
+        for series, item in (account_feedback.get("series") or {}).items():
             if item.get("status") != "ready":
                 continue
             experiment = item.get("experiment") or {}
+            if experiment.get("variable") == "pause_series":
+                continue  # 중단 후보는 아래 줄에 따로 적는다.
             ready_experiments.append(
                 f"{series}={experiment.get('variable', 'observe')}"
             )
         if ready_experiments:
             lines.append("  ↳ 다음 실험: " + " · ".join(ready_experiments[:3]))
-    title = f"주간 인스타 리포트 · {week_key}"
-    if _notify_digest(title, "\n".join(lines)):
-        state["_instagram_weekly_digest"] = week_key
-        print(f"주간 다이제스트 발송: {week_key}")
+        pause_candidates = account_feedback.get("pause_candidates") or []
+        if pause_candidates:
+            lines.append(
+                "  ↳ 중단 후보 시리즈: "
+                + " · ".join(
+                    f"{item.get('series')}({item.get('format', '?')}, "
+                    f"{item.get('posts', '?')}편, 도달 중앙값 {item.get('median_reach', '?')})"
+                    for item in pause_candidates[:4]
+                )
+            )
+    return lines
 
 
 def main() -> None:

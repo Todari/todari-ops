@@ -25,6 +25,13 @@ DEFAULT_HOME = Path("/home/ubuntu")
 DEFAULT_OUTPUT = DEFAULT_HOME / "ops-watchdog" / "instagram-insights.json"
 PERFORMANCE_MINIMUM_POSTS = 5
 PERFORMANCE_CHECKPOINTS = (24, 72)
+# 성장 실험 변수 선택 기준(2026-09-03 진단: 릴스 시청 3~8초·프로필 방문 1~2/1000도달·피드 도달=팔로워).
+HOOK_WATCH_SECONDS = 5.0          # 릴스 시청 중앙값이 이보다 짧으면 훅부터 고친다.
+SHORT_WATCH_SECONDS = 4.0         # 이 미만 시청 릴스 비중을 유지율 대리 지표로 본다.
+PROFILE_VISIT_RATE_FLOOR = 3.0    # 도달 1,000당 프로필 방문이 이보다 적으면 팔로우 약속을 점검한다.
+SAVE_SHARE_RATE_FLOOR = 1.0       # 도달 1,000당 저장+공유가 이보다 적으면 저장 가치를 점검한다.
+PAUSE_MEDIAN_REACH = 20           # 5편 이상인데 24시간 도달 중앙값이 이 미만이면 중단 후보.
+MIN_REACH_FOR_VISIT_RATE = 100    # 일간 도달이 이보다 작으면 방문 비율이 요동쳐서(1/4=250) 계산하지 않는다.
 BASE_METRICS = (
     "views",
     "reach",
@@ -400,6 +407,7 @@ def summarize(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for item in items
             if "average_watch_seconds" in item["rates"]
         ]
+        watch_stats = _watch_statistics(watch_seconds)
         summaries.append(
             {
                 "tier": tier,
@@ -423,18 +431,26 @@ def summarize(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "median_reach": round(float(statistics.median(reaches)), 2),
                     "average_views": round(sum(views) / len(views), 2),
                     "median_views": round(float(statistics.median(views)), 2),
-                    **(
-                        {
-                            "average_watch_seconds": round(
-                                sum(watch_seconds) / len(watch_seconds), 3
-                            )
-                        }
-                        if watch_seconds else {}
-                    ),
+                    **watch_stats,
                 },
             }
         )
     return summaries
+
+
+def _watch_statistics(watch_seconds: list[float]) -> dict[str, float]:
+    """릴스 평균 시청 시간 목록을 유지율 대리 지표로 요약한다."""
+    if not watch_seconds:
+        return {}
+    return {
+        "average_watch_seconds": round(sum(watch_seconds) / len(watch_seconds), 3),
+        "median_watch_seconds": round(float(statistics.median(watch_seconds)), 3),
+        "watch_under_4s_share": round(
+            sum(1 for value in watch_seconds if value < SHORT_WATCH_SECONDS)
+            / len(watch_seconds),
+            3,
+        ),
+    }
 
 
 def _merge_history(previous: dict[str, Any], latest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -490,6 +506,7 @@ def _merge_media_samples(
             item["tier"] = record.get("tier")
             item["source_key"] = record.get("source_key")
             item["published_at"] = record.get("published_at")
+            item["media_product_type"] = record.get("media_product_type")
             current = [
                 sample
                 for sample in item.get("samples", [])
@@ -580,56 +597,145 @@ def _checkpoint_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "interactions_per_1000_reach": round(
             totals["total_interactions"] * 1000 / reach, 2
         ) if reach else 0.0,
-        **(
-            {"average_watch_seconds": round(sum(watch) / len(watch), 3)}
-            if watch else {}
-        ),
+        **_watch_statistics(watch),
+    }
+
+
+def _is_reel_series(items: list[dict[str, Any]]) -> bool:
+    """릴스 시리즈 판정. 구버전 샘플엔 media_product_type이 없어 시청 시간 유무로 보완한다."""
+    for item in items:
+        if item.get("media_product_type") == "REELS":
+            return True
+        for sample in item.get("samples") or []:
+            if isinstance((sample.get("rates") or {}).get("average_watch_seconds"), (int, float)):
+                return True
+    return False
+
+
+def _pause_experiment(reason: str) -> dict[str, str]:
+    return {
+        "variable": "pause_series",
+        "reason": reason,
+        "guidance": "비팔로워 노출 0 — 발행량을 줄이고 릴스에 집중",
     }
 
 
 def _experiment_for(
-    checkpoint: dict[str, Any], account_outcomes: dict[str, Any]
+    checkpoint: dict[str, Any],
+    account_outcomes: dict[str, Any],
+    *,
+    is_reel: bool = True,
 ) -> dict[str, str]:
-    """실적이 충분할 때 한 번에 바꿀 성장 변수 하나만 고른다."""
+    """실적이 충분할 때 한 번에 바꿀 성장 변수 하나만 고른다.
+
+    순서: 중단 규칙(도달 중앙값 < 20) → 피드의 팔로워 밖 노출 0 → 릴스 훅(시청 중앙값 < 5초)
+    → 프로필 전환(도달 1,000당 방문 < 3) → 저장·공유(도달 1,000당 < 1) → 관찰.
+    `pause_series`는 생성기 프롬프트에 넘기지 않고 운영 판단(발행량 조정)에만 쓴다.
+    """
+    posts = int(checkpoint.get("posts") or 0)
+    median_reach = checkpoint.get("median_reach")
+    followers = account_outcomes.get("followers")
+    if isinstance(median_reach, (int, float)) and float(median_reach) < PAUSE_MEDIAN_REACH:
+        return _pause_experiment(
+            f"{posts}편의 24시간 도달 중앙값 {float(median_reach):g} < {PAUSE_MEDIAN_REACH}"
+        )
+    if (
+        not is_reel
+        and isinstance(median_reach, (int, float))
+        and isinstance(followers, int)
+        and float(median_reach) <= followers
+    ):
+        return _pause_experiment(
+            f"피드 도달 중앙값 {float(median_reach):g}이 팔로워 {followers}명을 넘지 못함"
+        )
+    watch_seconds = checkpoint.get("median_watch_seconds", checkpoint.get("average_watch_seconds"))
+    if (
+        is_reel
+        and isinstance(watch_seconds, (int, float))
+        and float(watch_seconds) < HOOK_WATCH_SECONDS
+    ):
+        return {
+            "variable": "opening_hook",
+            "reason": (
+                f"릴스 시청 중앙값 {float(watch_seconds):g}초 < {HOOK_WATCH_SECONDS:g}초 — "
+                "테스트 노출 뒤 확산이 끊기는 원인"
+            ),
+            "guidance": (
+                "첫 프레임에 결과를 놓고 12자 이내 훅 한 줄만 얹는다. 인트로·제목 카드를 없애고 "
+                "전체 길이를 15초 이하로 줄이며 검증 사실과 장면 순서는 유지한다."
+            ),
+        }
+    visit_rate = account_outcomes.get("profile_visits_per_1000_reach")
+    if isinstance(visit_rate, (int, float)) and float(visit_rate) < PROFILE_VISIT_RATE_FLOOR:
+        delta = account_outcomes.get("follower_delta_7d")
+        if isinstance(delta, int) and delta <= 0:
+            reason = (
+                f"도달 1,000당 프로필 방문 {float(visit_rate):g} < {PROFILE_VISIT_RATE_FLOOR:g} · "
+                f"팔로워 증가 {delta:+d}"
+            )
+        else:
+            reason = f"도달 1,000당 프로필 방문 {float(visit_rate):g} < {PROFILE_VISIT_RATE_FLOOR:g}"
+        return {
+            "variable": "follow_promise",
+            "reason": reason,
+            "guidance": (
+                "마지막 장면과 캡션에서 다음에 무엇을 언제 확인해 주는 계정인지 한 문장으로 "
+                "화면에 약속하고 상투적인 팔로우 요청은 쓰지 않는다."
+            ),
+        }
     share_save_rate = float(checkpoint.get("saves_per_1000_reach") or 0) + float(
         checkpoint.get("shares_per_1000_reach") or 0
     )
-    watch_seconds = checkpoint.get("average_watch_seconds")
-    if share_save_rate == 0:
+    if share_save_rate < SAVE_SHARE_RATE_FLOOR:
         return {
             "variable": "save_share_value",
-            "reason": "성숙 게시물에서 저장과 공유가 아직 발생하지 않음",
+            "reason": (
+                f"도달 1,000당 저장+공유 {share_save_rate:g} < {SAVE_SHARE_RATE_FLOOR:g}"
+            ),
             "guidance": (
                 "검증된 사실과 기존 레이아웃 안에서 저장하거나 친구에게 보낼 이유가 되는 "
                 "한 가지 요약·질문만 강화하고 다른 구조는 유지한다."
             ),
         }
-    if isinstance(watch_seconds, (int, float)) and float(watch_seconds) < 6:
-        return {
-            "variable": "opening_hook",
-            "reason": "릴스 평균 시청 시간이 운영 기준 6초보다 짧음",
-            "guidance": (
-                "첫 3초에 콘텐츠의 질문·긴장·확인할 대상을 먼저 보여주고 이후 장면 순서와 "
-                "검증 사실은 유지한다."
-            ),
-        }
-    if (
-        isinstance(account_outcomes.get("profile_views_1d"), (int, float))
-        and float(account_outcomes["profile_views_1d"]) > 0
-        and isinstance(account_outcomes.get("follower_delta_7d"), int)
-        and int(account_outcomes["follower_delta_7d"]) <= 0
-    ):
-        reason = "최근 프로필 방문은 있었지만 7일 팔로워 증가는 확인되지 않음"
-    else:
-        reason = "초반 시청·공유 신호보다 프로필 전환 약속을 우선 점검할 단계"
     return {
-        "variable": "follow_promise",
-        "reason": reason,
-        "guidance": (
-            "마지막 장면이나 캡션에서 다음에 무엇을 언제 확인해 주는 계정인지 한 문장으로 "
-            "약속하고 상투적인 팔로우 요청은 쓰지 않는다."
-        ),
+        "variable": "observe",
+        "reason": "시청·프로필 전환·저장 기준을 모두 통과 — 현재 구조 유지",
+        "guidance": "기존 계약과 문체를 유지하고 성과 표본을 더 수집한다.",
     }
+
+
+def _follower_delta(
+    account: str,
+    followers: Any,
+    history: list[dict[str, Any]] | None,
+    *,
+    generated_date,
+) -> tuple[int | None, int | None]:
+    """7일 전 기준선이 있으면 그 값을, 없으면 보유한 가장 오래된 이력을 써서 증감을 계산한다.
+
+    반환: (증감, 실제 사용한 창 일수). 이력이 하루치도 없으면 (None, None).
+    """
+    if not isinstance(followers, int):
+        return None, None
+    entries = []
+    for entry in history or []:
+        if not isinstance(entry, dict):
+            continue
+        date_text = str(entry.get("date") or entry.get("collected_at") or "")[:10]
+        base = ((((entry.get("accounts") or {}).get(account) or {}).get("profile") or {})
+                .get("followers_count"))
+        try:
+            entry_date = datetime.fromisoformat(date_text).date()
+        except ValueError:
+            continue
+        if isinstance(base, int) and entry_date < generated_date:
+            entries.append((entry_date, base))
+    if not entries:
+        return None, None
+    baseline_date = generated_date - timedelta(days=7)
+    older = [item for item in entries if item[0] <= baseline_date]
+    chosen = max(older) if older else min(entries)
+    return followers - chosen[1], (generated_date - chosen[0]).days
 
 
 def _published_datetime(item: dict[str, Any]) -> datetime | None:
@@ -674,7 +780,6 @@ def build_performance_feedback(
     """실제 반응을 다음 생성기가 읽을 수 있는 계정·시리즈별 컨텍스트로 바꾼다."""
     feedback: dict[str, Any] = {}
     generated_date = datetime.fromisoformat(generated_at).date()
-    baseline_date = generated_date - timedelta(days=7)
     for account, account_samples in media_samples.items():
         if not isinstance(account_samples, dict):
             continue
@@ -685,37 +790,33 @@ def build_performance_feedback(
             by_series[item["series"]].append(item)
         latest_account = (latest.get("accounts") or {}).get(account) or {}
         profile = latest_account.get("profile") or {}
-        baseline_entry = max(
-            (
-                entry
-                for entry in (history or [])
-                if isinstance(entry, dict)
-                and str(entry.get("date") or entry.get("collected_at") or "")[:10]
-                <= baseline_date.isoformat()
-            ),
-            key=lambda entry: str(entry.get("date") or entry.get("collected_at") or "")[:10],
-            default=None,
-        )
-        baseline_followers = None
-        if baseline_entry:
-            baseline_followers = (
-                (((baseline_entry.get("accounts") or {}).get(account) or {}).get("profile") or {})
-                .get("followers_count")
-            )
         followers = profile.get("followers_count")
+        follower_delta, delta_window_days = _follower_delta(
+            account, followers, history, generated_date=generated_date
+        )
         account_metrics = (latest_account.get("account_metrics") or {}).get("metrics") or {}
+        profile_views = account_metrics.get("profile_views")
+        account_reach = account_metrics.get("reach")
+        visit_rate = None
+        if (
+            isinstance(profile_views, (int, float))
+            and isinstance(account_reach, (int, float))
+            and float(account_reach) >= MIN_REACH_FOR_VISIT_RATE
+        ):
+            visit_rate = round(float(profile_views) * 1000 / float(account_reach), 2)
         account_outcomes = {
-            "profile_views_1d": account_metrics.get("profile_views"),
+            "profile_views_1d": profile_views,
+            "reach_1d": account_reach,
+            "profile_visits_per_1000_reach": visit_rate,
             "followers": followers,
-            "follower_delta_7d": (
-                int(followers) - int(baseline_followers)
-                if isinstance(followers, int) and isinstance(baseline_followers, int)
-                else None
-            ),
+            "follower_delta_7d": follower_delta,
+            "follower_delta_window_days": delta_window_days,
             "attribution": "account_level_not_per_post",
         }
         series_feedback = {}
+        pause_candidates = []
         for series, items in sorted(by_series.items()):
+            is_reel = _is_reel_series(items)
             items, excluded_backfill_posts = _growth_eligible_items(
                 account, series, items
             )
@@ -732,19 +833,35 @@ def build_performance_feedback(
                 }
             mature = checkpoints["24h"]
             eligible = int(mature.get("posts") or 0) >= PERFORMANCE_MINIMUM_POSTS
-            series_feedback[series] = {
-                "status": "ready" if eligible else "collecting",
-                "minimum_posts": PERFORMANCE_MINIMUM_POSTS,
-                "excluded_backfill_posts": excluded_backfill_posts,
-                "checkpoints": checkpoints,
-                "experiment": _experiment_for(mature, account_outcomes) if eligible else {
+            experiment = (
+                _experiment_for(mature, account_outcomes, is_reel=is_reel)
+                if eligible
+                else {
                     "variable": "observe",
                     "reason": (
                         f"24시간 성과 {mature.get('posts', 0)}건 수집 · "
                         f"최소 {PERFORMANCE_MINIMUM_POSTS}건 필요"
                     ),
                     "guidance": "기존 계약과 문체를 유지하고 성과 표본을 더 수집한다.",
-                },
+                }
+            )
+            if experiment["variable"] == "pause_series":
+                pause_candidates.append(
+                    {
+                        "series": series,
+                        "format": "reel" if is_reel else "feed",
+                        "posts": int(mature.get("posts") or 0),
+                        "median_reach": mature.get("median_reach"),
+                        "reason": experiment["reason"],
+                    }
+                )
+            series_feedback[series] = {
+                "status": "ready" if eligible else "collecting",
+                "minimum_posts": PERFORMANCE_MINIMUM_POSTS,
+                "format": "reel" if is_reel else "feed",
+                "excluded_backfill_posts": excluded_backfill_posts,
+                "checkpoints": checkpoints,
+                "experiment": experiment,
             }
         feedback[account] = {
             "generated_at": generated_at,
@@ -755,7 +872,12 @@ def build_performance_feedback(
                 "facts_are_not_content_sources": True,
                 "one_experiment_variable_at_a_time": True,
                 "minimum_posts": PERFORMANCE_MINIMUM_POSTS,
+                "pause_rule": (
+                    f"24시간 표본 {PERFORMANCE_MINIMUM_POSTS}편 이상이고 도달 중앙값이 "
+                    f"{PAUSE_MEDIAN_REACH} 미만이거나, 피드 도달이 팔로워 수를 넘지 못하면 중단 후보"
+                ),
             },
+            "pause_candidates": pause_candidates,
             "series": series_feedback,
         }
     return feedback

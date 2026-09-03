@@ -27,6 +27,63 @@ KST = timezone(timedelta(hours=9))
 
 
 class InstagramWatchdogTest(unittest.TestCase):
+    def test_weekly_digest_lists_funnel_and_pause_candidates(self):
+        data = {
+            "latest": {
+                "accounts": {
+                    "yaitnal": {
+                        "handle": "yaitnal",
+                        "profile": {"followers_count": 11, "media_count": 95},
+                        "account_metrics": {"metrics": {"views": 949, "reach": 667}},
+                        "records": [{
+                            "series": "flow-reel",
+                            "published_at": "2026-09-02T03:16:00+09:00",
+                            "metrics": {"reach": 193},
+                            "permalink": "https://instagram.example/reel/x",
+                        }],
+                    }
+                }
+            },
+            "history": [],
+            "performance_feedback": {
+                "yaitnal": {
+                    "account_outcomes": {
+                        "profile_views_1d": 7,
+                        "profile_visits_per_1000_reach": 10.49,
+                        "follower_delta_7d": 0,
+                        "follower_delta_window_days": 3,
+                    },
+                    "pause_candidates": [
+                        {"series": "preview", "format": "feed", "posts": 34, "median_reach": 5.0},
+                    ],
+                    "series": {
+                        "preview": {
+                            "status": "ready",
+                            "experiment": {"variable": "pause_series"},
+                        },
+                        "flow-reel": {
+                            "status": "ready",
+                            "experiment": {"variable": "opening_hook"},
+                        },
+                    },
+                }
+            },
+        }
+
+        lines = watchdog.build_weekly_digest_lines(
+            data, datetime(2026, 9, 6, 21, 5, tzinfo=KST)
+        )
+
+        self.assertEqual(
+            lines[1],
+            "  ↳ 퍼널: 도달 1,000당 프로필 방문 10.49 (방문 7) · 팔로워 +0 (3일 창)",
+        )
+        self.assertIn("  ↳ 다음 실험: flow-reel=opening_hook", lines)
+        self.assertIn(
+            "  ↳ 중단 후보 시리즈: preview(feed, 34편, 도달 중앙값 5.0)", lines
+        )
+        self.assertFalse(any("preview=pause_series" in line for line in lines))
+
     def test_graph_only_flow_is_not_scheduled_as_a_reel(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
