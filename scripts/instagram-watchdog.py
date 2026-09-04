@@ -30,6 +30,7 @@ HOME = Path("/home/ubuntu")
 STATE_PATH = HOME / "ops-watchdog" / "state.json"
 INSIGHTS_PATH = HOME / "ops-watchdog" / "instagram-insights.json"
 LEDGER_PATH = HOME / "ops-watchdog" / "instagram-jobs.sqlite3"
+GONGGU_STATUS_PATH = Path("/opt/gonggu-radar/data/publish_status.json")
 
 JUJINMO_CONTENT_TYPES = {
     "premarket": {"premarket_hypothesis", "premarket_preview"},
@@ -320,6 +321,11 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             flow = entries.get(flow_key) if isinstance(entries.get(flow_key), dict) else {}
             reel = reels.get(reel_key) if isinstance(reels.get(reel_key), dict) else {}
             flow_published = flow.get("status") == "published" or bool(flow.get("media_id"))
+            flow_skipped = (
+                flow.get("status") == "skipped"
+                and flow.get("stage") == "feed_policy"
+                and bool(flow.get("skip_reason"))
+            )
             reel_published = reel.get("status") == "published" or bool(reel.get("media_id"))
             flow_job = f"jakkuyagu:flow:{game_id}"
             reel_job = f"jakkuyagu:flow-reel:{game_id}"
@@ -345,7 +351,14 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
                 permalink=reel.get("permalink"),
                 now=now,
             )
-            if flow_published and not _flow_has_reel_source(flow):
+            if flow_skipped:
+                flow_state = ledger.cancel(
+                    flow_job,
+                    detail=str(flow["skip_reason"]),
+                    now=now,
+                )
+                state.pop(flow_job, None)
+            if not _flow_has_reel_source(flow):
                 reel_state = ledger.cancel(
                     reel_job,
                     detail="검증된 영상 소스가 없어 그래프 캐러셀만 출고됨",
@@ -368,7 +381,7 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
                     )
             if flow_state["status"] in {"missing", "recovering"}:
                 missing_flow_jobs.append((flow_job, game_date))
-            elif flow_published and reel_state["status"] in {"missing", "recovering"}:
+            elif reel_state["status"] in {"missing", "recovering"}:
                 missing_reel_jobs.append((reel_job, game_date, game_id))
 
     if missing_flow_jobs:
@@ -429,6 +442,55 @@ def _flow_has_reel_source(flow: dict) -> bool:
         not config.get("clips")
         and str(fallback.get("mode", "")).endswith("graph_only")
     )
+
+
+def check_gonggu(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
+    """Check the daily gonggu publication; its systemd timer owns retries."""
+    if not GONGGU_STATUS_PATH.is_file():
+        print(f"안내: 공구함 상태 파일 없음 — {GONGGU_STATUS_PATH}")
+        return
+
+    status = json.loads(GONGGU_STATUS_PATH.read_text(encoding="utf-8"))
+    today = now.astimezone(KST).date()
+    today_text = today.isoformat()
+    publication_state = status.get("state") if status.get("publication_date") == today_text else None
+    published = publication_state in {"published", "already_published"}
+    expected_at = datetime.combine(today, datetime.min.time(), tzinfo=KST).replace(
+        hour=10, minute=35
+    )
+    due_at = expected_at.replace(hour=11, minute=50)
+    job_id = f"gonggu:daily:{today_text}"
+    item = ledger.sync(
+        job_id=job_id,
+        account="gonggu",
+        content_type="gonggu-daily",
+        source_key=today_text,
+        expected_at=expected_at,
+        due_at=due_at,
+        published=published,
+        permalink=status.get("permalink") if published else None,
+        now=now,
+    )
+
+    if published:
+        state.pop(job_id, None)
+        return
+    if publication_state == "skipped":
+        ledger.cancel(
+            job_id,
+            detail=str(status.get("detail") or "공구함 게시가 의도적으로 건너뛰어짐"),
+            now=now,
+        )
+        state.pop(job_id, None)
+        return
+    if publication_state == "failed" or item["status"] in {
+        "missing",
+        "recovering",
+        "operator_required",
+    }:
+        detail = status.get("detail") if publication_state == "failed" else None
+        message = detail or f"{today_text} 공구 일일 다이제스트가 마감 시각까지 게시되지 않았습니다."
+        _alert_once(state, job_id, "gonggu", "gonggu-daily", str(message))
 
 
 def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> None:
@@ -718,6 +780,7 @@ def main() -> None:
         ("jujinmo", check_jujinmo, now),
         ("jakkuyagu", check_jakkuyagu, now),
         ("sector4", check_sector4, datetime.now(timezone.utc)),
+        ("gonggu", check_gonggu, now),
     ):
         try:
             check(state, arg, ledger)

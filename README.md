@@ -170,6 +170,14 @@ EC2 호스트의 `scripts/instagram-watchdog.py`는 게시 침묵 실패를 감�
 이후 한 번 `scripts/instagram_portfolio.py`를 실행한다. 야있날·섹터4·주진모의 최근 14일
 게시물을 같은 스키마로 수집해 `/home/ubuntu/ops-watchdog/instagram-insights.json`에 저장한다.
 
+공구함은 `/opt/gonggu-radar/data/publish_status.json`의 `version`, KST 기준
+`publication_date`, `state`(`published`·`already_published`·`skipped`·`failed`), `account`,
+`instagram_media_id`, `permalink`, `media_count`, `detail`, `updated_at` 필드를 읽어 매일 KST
+11:50까지 게시됐는지 감시한다. 파일이 아직 없으면 배포 전 상태로 보고 안내만 남긴다.
+공구함의 `skipped`와 야있날 flow의 `status: skipped`, `stage: feed_policy`, `skip_reason` 조합은
+의도적인 정책 제외로 ledger를 취소 처리하며 경고나 자동 복구를 하지 않는다. 야있날 릴스는
+flow의 정책 제외와 무관하게 `reels.json`의 게시 상태를 기준으로 계속 감시한다.
+
 - 각 계정 토큰은 해당 `/home/ubuntu/<repo>/.env`에서 읽으며 결과 파일에 기록하지 않는다.
 - 게시물 조회·도달·저장·공유·반응·릴스 평균 시청 시간과 계정 프로필 조회·팔로워 수를 수집한다.
 - 핵심 포맷과 보조 포맷을 분리하고 도달 1,000명당 저장·공유·반응을 계산한다.

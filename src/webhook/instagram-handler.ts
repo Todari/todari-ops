@@ -26,6 +26,12 @@ const ACCOUNTS = {
     profileUrl: "https://www.instagram.com/ju.jin.mo/",
     color: 0x111111,
   },
+  gonggu: {
+    displayName: "공구함",
+    handle: "@09._.ham",
+    profileUrl: "https://www.instagram.com/09._.ham/",
+    color: 0xf59e0b,
+  },
 } as const;
 
 type Account = keyof typeof ACCOUNTS;
@@ -44,7 +50,7 @@ export interface InstagramPostEvent {
 }
 
 export interface InstagramQualityReview {
-  audience: "baseball_fan" | "f1_fan";
+  audience: "baseball_fan" | "f1_fan" | "stock_reader";
   overallScore: number;
   scores: Record<string, number>;
   summary: string;
@@ -90,7 +96,8 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
   if (
     raw.account !== "jakkuyagu" &&
     raw.account !== "sector4" &&
-    raw.account !== "jujinmo"
+    raw.account !== "jujinmo" &&
+    raw.account !== "gonggu"
   ) {
     return null;
   }
@@ -214,7 +221,11 @@ export function buildInstagramMessage(event: InstagramEvent): MessageCreateOptio
     });
   }
   if (event.qualityReview) {
-    const audience = event.qualityReview.audience === "f1_fan" ? "F1 팬" : "야구팬";
+    const audience = {
+      baseball_fan: "야구팬",
+      f1_fan: "F1 팬",
+      stock_reader: "주식 독자",
+    }[event.qualityReview.audience];
     embed.addFields(
       {
         name: `${audience} 관점 품질 점수`,
@@ -365,7 +376,11 @@ function optionalQualityReview(value: unknown): InstagramQualityReview | null | 
   if (value === null || value === undefined || value === "") return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
-  if (raw.audience !== "baseball_fan" && raw.audience !== "f1_fan") return undefined;
+  if (
+    raw.audience !== "baseball_fan" &&
+    raw.audience !== "f1_fan" &&
+    raw.audience !== "stock_reader"
+  ) return undefined;
   if (
     typeof raw.overall_score !== "number" || !Number.isInteger(raw.overall_score) ||
     raw.overall_score < 0 || raw.overall_score > 100
@@ -451,6 +466,7 @@ function contentTypeLabel(value: string, account: Account): string {
     "integration-test": "연동 테스트",
     "interface-preview": "알림 UI 미리보기",
     "daily-content": "야있날 일일 콘텐츠",
+    "gonggu-daily": "공구 일일 다이제스트",
     premarket_preview: "장전 한 장",
     premarket_hypothesis: "장전 근거 분석",
     close_review: "마감 한 장",

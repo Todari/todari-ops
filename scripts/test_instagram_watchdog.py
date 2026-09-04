@@ -212,6 +212,151 @@ class InstagramWatchdogTest(unittest.TestCase):
             finally:
                 ledger.close()
 
+    def test_feed_policy_skipped_flow_is_cancelled_but_reel_remains_expected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            content_path = root / "jakkuyagu" / "state" / "daily_content.json"
+            content_path.parent.mkdir(parents=True)
+            content_path.write_text(
+                json.dumps(
+                    {
+                        "2026-09-03:flow:game-1": {
+                            "status": "skipped",
+                            "stage": "feed_policy",
+                            "skip_reason": "피드 발행 정책에 따라 제외",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_kbo = types.SimpleNamespace(
+                fetch_games=lambda game_date: [
+                    {
+                        "gameId": "game-1",
+                        "statusCode": "RESULT",
+                        "cancel": None,
+                        "gameDateTime": "2026-09-03T14:00:00+09:00",
+                    }
+                ] if game_date == "2026-09-03" else []
+            )
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with (
+                    patch.dict(sys.modules, {"kbo": fake_kbo}),
+                    patch.object(watchdog, "HOME", root),
+                    patch.object(watchdog, "_alert_once") as alert,
+                    patch.object(watchdog, "_run_recovery") as recovery,
+                ):
+                    watchdog.check_jakkuyagu(
+                        {}, datetime(2026, 9, 3, 20, 30, tzinfo=KST), ledger
+                    )
+
+                flow = ledger.get("jakkuyagu:flow:game-1")
+                reel = ledger.get("jakkuyagu:flow-reel:game-1")
+                self.assertEqual(flow["status"], "cancelled")
+                self.assertEqual(flow["last_error"], "피드 발행 정책에 따라 제외")
+                self.assertEqual(reel["status"], "expected")
+                alert.assert_not_called()
+                recovery.assert_not_called()
+            finally:
+                ledger.close()
+
+    def test_gonggu_missing_status_file_is_quiet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with (
+                    patch.object(watchdog, "GONGGU_STATUS_PATH", root / "missing.json"),
+                    patch.object(watchdog, "_alert_once") as alert,
+                    patch("builtins.print") as output,
+                ):
+                    watchdog.check_gonggu(
+                        {}, datetime(2026, 9, 4, 12, 0, tzinfo=KST), ledger
+                    )
+                alert.assert_not_called()
+                output.assert_called_once()
+                self.assertEqual(ledger.unresolved(), [])
+            finally:
+                ledger.close()
+
+    def test_gonggu_today_published_creates_no_alert(self):
+        self._assert_gonggu_state("published", expected_ledger_status="published")
+
+    def test_gonggu_today_skipped_is_cancelled(self):
+        self._assert_gonggu_state(
+            "skipped",
+            detail="오늘은 대상 상품 없음",
+            expected_ledger_status="cancelled",
+        )
+
+    def test_gonggu_today_failed_alerts_before_due(self):
+        self._assert_gonggu_state(
+            "failed",
+            detail="Instagram API 오류",
+            now=datetime(2026, 9, 4, 11, 0, tzinfo=KST),
+            expected_ledger_status="expected",
+            expected_alerts=1,
+        )
+
+    def test_gonggu_past_due_missing_alerts_once(self):
+        self._assert_gonggu_state(
+            None,
+            publication_date="2026-09-03",
+            expected_ledger_status="missing",
+            expected_alerts=1,
+        )
+
+    def _assert_gonggu_state(
+        self,
+        publication_state,
+        *,
+        publication_date="2026-09-04",
+        detail=None,
+        now=datetime(2026, 9, 4, 12, 0, tzinfo=KST),
+        expected_ledger_status,
+        expected_alerts=0,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            status_path = root / "publish_status.json"
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "publication_date": publication_date,
+                        "state": publication_state,
+                        "account": "09._.ham",
+                        "instagram_media_id": "media-1" if publication_state == "published" else None,
+                        "permalink": "https://www.instagram.com/p/example/"
+                        if publication_state == "published"
+                        else None,
+                        "media_count": 3 if publication_state == "published" else None,
+                        "detail": detail,
+                        "updated_at": "2026-09-04T11:00:00+09:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with (
+                    patch.object(watchdog, "GONGGU_STATUS_PATH", status_path),
+                    patch.object(watchdog, "_alert_once") as alert,
+                ):
+                    watchdog.check_gonggu({}, now, ledger)
+                self.assertEqual(
+                    ledger.get("gonggu:daily:2026-09-04")["status"],
+                    expected_ledger_status,
+                )
+                self.assertEqual(alert.call_count, expected_alerts)
+                if publication_state == "skipped":
+                    self.assertEqual(
+                        ledger.get("gonggu:daily:2026-09-04")["last_error"], detail
+                    )
+            finally:
+                ledger.close()
+
 
 if __name__ == "__main__":
     unittest.main()

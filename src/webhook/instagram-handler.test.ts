@@ -136,6 +136,79 @@ describe("Instagram webhook event", () => {
     );
   });
 
+  it("accepts a stock-reader quality review for jujinmo", () => {
+    const event = normalizeInstagramEvent({
+      ...validPayload,
+      account: "jujinmo",
+      content_type: "premarket_hypothesis",
+      quality_review: {
+        ...validPayload.quality_review,
+        audience: "stock_reader",
+      },
+    });
+
+    expect(event?.status).toBe("published");
+    if (!event || event.status !== "published") throw new Error("expected published event");
+    expect(event.qualityReview?.audience).toBe("stock_reader");
+    const embed = buildInstagramMessage(event).embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "주식 독자 관점 품질 점수" }),
+        expect.objectContaining({ name: "게시물 유형", value: "장전 근거 분석" }),
+      ]),
+    );
+  });
+
+  it("normalizes gonggu publishes and builds the account embed", () => {
+    const event = normalizeInstagramEvent({
+      account: "gonggu",
+      media_id: "17890000000000002",
+      permalink: "https://www.instagram.com/p/gonggu-example/",
+      caption: "오늘의 공동구매\n마감 전에 확인할 상품을 모았습니다.",
+      content_type: "gonggu-daily",
+      source_key: "2026-09-04",
+      quality_review: null,
+      published_at: "2026-09-04T10:35:00+09:00",
+    });
+
+    expect(event?.status).toBe("published");
+    if (!event || event.status !== "published") throw new Error("expected published event");
+    const embed = buildInstagramMessage(event).embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({ author: { name: "공구함 @09._.ham" } });
+    expect(json?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "게시물 유형", value: "공구 일일 다이제스트" }),
+      ]),
+    );
+  });
+
+  it("normalizes gonggu failures and builds the account embed", () => {
+    const event = normalizeInstagramEvent({
+      account: "gonggu",
+      status: "failed",
+      error_type: "RuntimeError",
+      error_message: "공구 게시 실패",
+      content_type: "gonggu-daily",
+      source_key: "2026-09-04",
+      stage: "media_publish",
+      failure_category: "api_error",
+      attempt: 1,
+      next_retry_at: null,
+      occurred_at: "2026-09-04T10:40:00+09:00",
+    });
+
+    expect(event?.status).toBe("failed");
+    if (!event || event.status !== "failed") throw new Error("expected failure event");
+    const embed = buildInstagramMessage(event).embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({
+      title: "공구함 자동 게시 실패",
+      author: { name: "공구함 @09._.ham" },
+    });
+  });
+
   it("builds a red embed for jujinmo scheduled failures", () => {
     const event = normalizeInstagramEvent({
       account: "jujinmo",
