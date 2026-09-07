@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,59 @@ UTC = timezone.utc
 
 
 class ReliabilityLedgerTest(unittest.TestCase):
+    def test_existing_database_is_migrated_with_alert_columns(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "jobs.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.execute(
+                """
+                CREATE TABLE jobs (
+                    job_id TEXT PRIMARY KEY,
+                    account TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    source_key TEXT NOT NULL,
+                    expected_at TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    permalink TEXT,
+                    last_error TEXT,
+                    recovery_attempts INTEGER NOT NULL DEFAULT 0,
+                    next_recovery_at TEXT,
+                    first_seen_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    resolved_at TEXT
+                )
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            ledger = ReliabilityLedger(path)
+            try:
+                columns = {
+                    row["name"]
+                    for row in ledger.connection.execute(
+                        "PRAGMA table_info(jobs)"
+                    ).fetchall()
+                }
+                self.assertTrue(
+                    {"alert_stage", "alerted_at", "policy_cancelled"} <= columns
+                )
+                now = datetime(2026, 9, 7, 1, 0, tzinfo=UTC)
+                item = ledger.sync(
+                    job_id="legacy:job",
+                    account="legacy",
+                    content_type="post",
+                    source_key="legacy",
+                    expected_at=now - timedelta(hours=2),
+                    due_at=now - timedelta(hours=1),
+                    published=False,
+                    now=now,
+                )
+                self.assertEqual(item["status"], "missing")
+            finally:
+                ledger.close()
+
     def test_expected_job_becomes_missing_then_published(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
@@ -77,6 +131,38 @@ class ReliabilityLedgerTest(unittest.TestCase):
                 )
 
             self.assertEqual(item["status"], "operator_required")
+            self.assertIsNone(item["next_recovery_at"])
+            ledger.close()
+
+    def test_later_policy_due_resets_recovering_job_to_expected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            now = datetime(2026, 9, 7, 11, 0, tzinfo=UTC)
+            job_id = "jakkuyagu:flow:game"
+            ledger.sync(
+                job_id=job_id,
+                account="jakkuyagu",
+                content_type="flow",
+                source_key="game",
+                expected_at=now - timedelta(hours=2),
+                due_at=now - timedelta(hours=1),
+                published=False,
+                now=now,
+            )
+            ledger.defer_recovery(job_id, detail="기존 조기 복구", now=now)
+
+            item = ledger.sync(
+                job_id=job_id,
+                account="jakkuyagu",
+                content_type="flow",
+                source_key="game",
+                expected_at=now - timedelta(hours=2),
+                due_at=now + timedelta(hours=4),
+                published=False,
+                now=now + timedelta(minutes=15),
+            )
+
+            self.assertEqual(item["status"], "expected")
             self.assertIsNone(item["next_recovery_at"])
             ledger.close()
 

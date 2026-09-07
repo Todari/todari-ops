@@ -6,7 +6,8 @@
 상태를 대조해 감지하고, 기존 인스타 알림 웹훅(실패 임베드)으로 경고한다.
 
 EC2 호스트 크론(15분 간격)에서 /home/ubuntu/jujinmo/.venv/bin/python 으로 실행한다.
-같은 경고는 알림 키 단위로 6시간 동안 중복 발송하지 않는다(state.json).
+같은 job은 ledger에 기록된 단계에 따라 최초 감지와 최종 결과만 알리고,
+복구가 24시간을 넘긴 경우에만 리마인더를 한 번 허용한다.
 """
 
 from __future__ import annotations
@@ -34,6 +35,13 @@ LEDGER_PATH = HOME / "ops-watchdog" / "instagram-jobs.sqlite3"
 GONGGU_STATUS_PATH = Path("/opt/gonggu-radar/data/publish_status.json")
 INSIGHTS_ACCOUNTS = ("sector4", "yaitnal", "jujinmo", "gonggu")
 RECOVERY_LOCK_MESSAGE = "다른 야있날 생성·게시 프로세스가 실행 중"
+JAKKUYAGU_POLICY_DEFAULTS = {
+    "flow_per_day": 1,
+    "reel_per_day": 1,
+    "flow_decision_deadline_hours_after_last_first_pitch": 5,
+    "reel_decision_deadline_kst": "23:30",
+}
+REEL_POLICY_STAGE = "reel_policy"
 
 JUJINMO_CONTENT_TYPES = {
     "premarket": {"premarket_hypothesis", "premarket_preview"},
@@ -202,17 +210,80 @@ def _notify(account: str, content_type: str, source_key: str, message: str) -> b
     return sent
 
 
-def _alert_once(state: dict, key: str, account: str, content_type: str, message: str) -> None:
-    previous = state.get(key)
-    if isinstance(previous, str):
+def _alert_once(
+    state: dict,
+    ledger: ReliabilityLedger,
+    key: str,
+    account: str,
+    content_type: str,
+    message: str,
+    *,
+    now: datetime | None = None,
+    force_initial: bool = False,
+) -> None:
+    """job 단계별 최초·24시간 리마인더·최종 알림을 각각 한 번만 보낸다."""
+    current = now or datetime.now(KST)
+    item = ledger.get(key)
+    if not item:
+        return
+    status = item["status"]
+    initial_at = ledger.alert_time(key, "initial")
+    legacy_alerted_at = state.get(key)
+    if initial_at is None and isinstance(legacy_alerted_at, str):
         try:
-            if datetime.now(KST) < datetime.fromisoformat(previous) + timedelta(hours=6):
-                return
+            parsed = datetime.fromisoformat(legacy_alerted_at)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=KST)
+            ledger.record_alert(key, "initial", now=parsed)
+            initial_at = parsed
+            state.pop(key, None)
         except ValueError:
             pass
-    print(f"경고 발송: {key} — {message}")
-    if _notify(account, content_type, key, message):
-        state[key] = datetime.now(KST).isoformat(timespec="seconds")
+    stage = None
+    alert_message = message
+    if initial_at is None and (status in {"missing", "recovering"} or force_initial):
+        stage = "initial"
+        alert_message = f"지연 감지·자동 복구 시작 — {message}"
+    elif initial_at is None and status == "operator_required":
+        stage = "final_operator_required"
+        alert_message = f"자동 복구 실패·운영자 확인 필요 — {message}"
+    elif initial_at is not None and not ledger.has_final_alert(key):
+        if status == "published":
+            stage = "final_published"
+            alert_message = f"지연 게시 완료 — {message}"
+        elif status == "operator_required":
+            stage = "final_operator_required"
+            alert_message = f"자동 복구 실패·운영자 확인 필요 — {message}"
+        elif status == "cancelled" and not item.get("policy_cancelled"):
+            stage = "final_cancelled"
+            alert_message = f"게시 취소 — {message}"
+    if (
+        stage is None
+        and initial_at is not None
+        and status == "recovering"
+        and ledger.alert_time(key, "reminder_24h") is None
+        and current >= initial_at.astimezone(current.tzinfo) + timedelta(hours=24)
+    ):
+        stage = "reminder_24h"
+        alert_message = f"복구 24시간 경과 — {message}"
+    if stage is None:
+        return
+    print(f"경고 발송: {key} [{stage}] — {alert_message}")
+    if _notify(account, content_type, key, alert_message):
+        ledger.record_alert(key, stage, now=current)
+        state.pop(key, None)  # 예전 6시간 중복 방지 키는 더 이상 사용하지 않는다.
+
+
+def _job_needs_alert_check(ledger: ReliabilityLedger, item: dict) -> bool:
+    status = item["status"]
+    if status in {"missing", "recovering", "operator_required"}:
+        return True
+    if status not in {"published", "cancelled"} or item.get("policy_cancelled"):
+        return False
+    return bool(
+        ledger.alert_time(item["job_id"], "initial")
+        and not ledger.has_final_alert(item["job_id"])
+    )
 
 
 def check_jujinmo(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
@@ -271,18 +342,21 @@ def check_jujinmo(state: dict, now: datetime, ledger: ReliabilityLedger) -> None
             permalink=(actual or {}).get("permalink"),
             now=now,
         )
+        if _job_needs_alert_check(ledger, item):
+            _alert_once(
+                state,
+                ledger,
+                job_id,
+                "jujinmo",
+                CONTENT_TYPE_BY_PHASE[phase],
+                f"{today} {phase} 콘텐츠",
+                now=now,
+            )
         if item["status"] == "published":
             state.pop(job_id, None)
             continue
         if item["status"] not in {"missing", "recovering", "operator_required"}:
             continue
-        _alert_once(
-            state,
-            job_id,
-            "jujinmo",
-            CONTENT_TYPE_BY_PHASE[phase],
-            f"{today} {phase} 콘텐츠가 마감 시각까지 게시되지 않아 자동 복구를 시도합니다.",
-        )
         within_recovery_window = (
             (phase == "premarket" and now.hour < 9)
             or (phase == "close" and now.hour < 20)
@@ -302,6 +376,7 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
 
     content_path = HOME / "jakkuyagu" / "state" / "daily_content.json"
     reels_path = HOME / "jakkuyagu" / "state" / "reels.json"
+    policy = _load_jakkuyagu_feed_policy()
     entries = {}
     reels = {}
     if content_path.is_file():
@@ -314,16 +389,40 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
         now.date().isoformat(),
         (now.date() - timedelta(days=1)).isoformat(),
     ):
-        games = [
+        day_games = [
             game
             for game in kbo.fetch_games(game_date)
-            if game.get("statusCode") == "RESULT" and not game.get("cancel")
+            if game.get("roundCode") in {None, "kbo_r"}
+            and not _jakkuyagu_game_cancelled(game)
         ]
+        games = [game for game in day_games if game.get("statusCode") == "RESULT"]
+        starts = [
+            scheduled
+            for game in day_games
+            if (scheduled := _game_start(game, game_date))
+        ]
+        last_start = max(starts) if starts else None
+        flow_decision_due = (
+            last_start
+            + timedelta(
+                hours=float(
+                    policy["flow_decision_deadline_hours_after_last_first_pitch"]
+                )
+                + 1
+            )
+            if last_start
+            else None
+        )
+        reel_decision = reels.get(f"{game_date}:reel-policy")
+        reel_decided = isinstance(reel_decision, dict) and (
+            reel_decision.get("featured_game_ids") is not None
+        )
+        reel_decision_due = _reel_policy_alert_due(game_date, policy)
         for game in games:
             game_id = str(game["gameId"])
-            scheduled = datetime.fromisoformat(str(game.get("gameDateTime") or game_date))
-            if scheduled.tzinfo is None:
-                scheduled = scheduled.replace(tzinfo=KST)
+            scheduled = _game_start(game, game_date)
+            if scheduled is None:
+                continue
             flow_key = f"{game_date}:flow:{game_id}"
             reel_key = f"{game_date}:flow-reel:{game_id}"
             flow = entries.get(flow_key) if isinstance(entries.get(flow_key), dict) else {}
@@ -332,41 +431,82 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             flow_skipped = (
                 flow.get("status") == "skipped"
                 and flow.get("stage") == "feed_policy"
-                and bool(flow.get("skip_reason"))
             )
             reel_published = reel.get("status") == "published" or bool(reel.get("media_id"))
+            reel_skipped = (
+                reel.get("status") == "skipped"
+                and reel.get("stage") == REEL_POLICY_STAGE
+            )
             flow_job = f"jakkuyagu:flow:{game_id}"
             reel_job = f"jakkuyagu:flow-reel:{game_id}"
-            flow_state = ledger.sync(
-                job_id=flow_job,
-                account="jakkuyagu",
-                content_type="flow",
-                source_key=flow_key,
-                expected_at=scheduled + timedelta(hours=4),
-                due_at=scheduled + timedelta(hours=6),
-                published=flow_published,
-                permalink=flow.get("permalink"),
-                now=now,
-            )
-            reel_state = ledger.sync(
-                job_id=reel_job,
-                account="jakkuyagu",
-                content_type="game-flow-reel",
-                source_key=reel_key,
-                expected_at=scheduled + timedelta(hours=4, minutes=30),
-                due_at=scheduled + timedelta(hours=7),
-                published=reel_published,
-                permalink=reel.get("permalink"),
-                now=now,
-            )
-            if flow_skipped:
-                flow_state = ledger.cancel(
-                    flow_job,
-                    detail=str(flow["skip_reason"]),
+            flow_state = None
+            if int(policy["flow_per_day"]) > 0:
+                flow_due = scheduled + timedelta(hours=6)
+                if flow_decision_due:
+                    flow_due = max(flow_due, flow_decision_due)
+                flow_state = ledger.sync(
+                    job_id=flow_job,
+                    account="jakkuyagu",
+                    content_type="flow",
+                    source_key=flow_key,
+                    expected_at=scheduled + timedelta(hours=4),
+                    due_at=flow_due,
+                    published=flow_published,
+                    permalink=flow.get("permalink"),
                     now=now,
                 )
+            elif ledger.get(flow_job):
+                flow_state = ledger.cancel(
+                    flow_job,
+                    detail="flow_per_day=0 피드 발행 정책",
+                    now=now,
+                    policy=True,
+                )
+            reel_state = None
+            if int(policy["reel_per_day"]) > 0 or reel_skipped:
+                reel_due = scheduled + timedelta(hours=7)
+                if not reel_decided:
+                    reel_due = max(reel_due, reel_decision_due)
+                reel_state = ledger.sync(
+                    job_id=reel_job,
+                    account="jakkuyagu",
+                    content_type="game-flow-reel",
+                    source_key=reel_key,
+                    expected_at=scheduled + timedelta(hours=4, minutes=30),
+                    due_at=reel_due,
+                    published=reel_published,
+                    permalink=reel.get("permalink"),
+                    now=now,
+                )
+            elif ledger.get(reel_job):
+                reel_state = ledger.cancel(
+                    reel_job,
+                    detail="reel_per_day=0 릴스 발행 정책",
+                    now=now,
+                    policy=True,
+                )
+            if flow_skipped:
+                if flow_state:
+                    flow_state = ledger.cancel(
+                        flow_job,
+                        detail=str(flow.get("skip_reason") or "피드 발행 정책에 따라 제외"),
+                        now=now,
+                        policy=True,
+                    )
                 state.pop(flow_job, None)
-            if not _flow_has_reel_source(flow):
+            if reel_skipped and reel_state:
+                reel_state = ledger.cancel(
+                    reel_job,
+                    detail=str(
+                        reel.get("skip_reason")
+                        or reel.get("reason")
+                        or "릴스 발행 정책에 따라 제외"
+                    ),
+                    now=now,
+                    policy=True,
+                )
+                state.pop(reel_job, None)
+            elif reel_state and not _flow_has_reel_source(flow):
                 reel_state = ledger.cancel(
                     reel_job,
                     detail="검증된 영상 소스가 없어 그래프 캐러셀만 출고됨",
@@ -377,19 +517,23 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
                 (flow_job, flow_state, "flow"),
                 (reel_job, reel_state, "game-flow-reel"),
             ):
-                if item["status"] == "published":
-                    state.pop(job_id, None)
-                elif item["status"] in {"missing", "recovering", "operator_required"}:
+                if item is None:
+                    continue
+                if _job_needs_alert_check(ledger, item):
                     _alert_once(
                         state,
+                        ledger,
                         job_id,
                         "jakkuyagu",
                         content_type,
-                        f"{game_date} {game_id}의 {content_type} 게시가 지연되어 자동 복구를 시도합니다.",
+                        f"{game_date} {game_id}의 {content_type} 게시",
+                        now=now,
                     )
-            if flow_state["status"] in {"missing", "recovering"}:
+                if item["status"] == "published":
+                    state.pop(job_id, None)
+            if flow_state and flow_state["status"] in {"missing", "recovering"}:
                 missing_flow_jobs.append((flow_job, game_date))
-            elif reel_state["status"] in {"missing", "recovering"}:
+            elif reel_state and reel_state["status"] in {"missing", "recovering"}:
                 missing_reel_jobs.append((reel_job, game_date, game_id))
 
     if missing_flow_jobs:
@@ -428,6 +572,69 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             cwd=HOME / "jakkuyagu",
             timeout=1800,
         )
+
+
+def _load_jakkuyagu_feed_policy() -> dict:
+    path = HOME / "jakkuyagu" / "config" / "feed_policy.json"
+    policy = dict(JAKKUYAGU_POLICY_DEFAULTS)
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("야있날 피드 정책 파일은 JSON 객체여야 합니다.")
+        policy.update(
+            {key: loaded[key] for key in JAKKUYAGU_POLICY_DEFAULTS if key in loaded}
+        )
+    for key in ("flow_per_day", "reel_per_day"):
+        value = policy[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"야있날 피드 정책 {key}는 0 이상의 정수여야 합니다.")
+    try:
+        deadline_hours = float(
+            policy["flow_decision_deadline_hours_after_last_first_pitch"]
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("야있날 flow 결정 시한이 숫자가 아닙니다.") from error
+    if deadline_hours < 0:
+        raise ValueError("야있날 flow 결정 시한은 0 이상이어야 합니다.")
+    policy["flow_decision_deadline_hours_after_last_first_pitch"] = deadline_hours
+    try:
+        hour, minute = (
+            int(value)
+            for value in str(policy["reel_decision_deadline_kst"]).split(":")
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("야있날 릴스 결정 시한은 HH:MM 형식이어야 합니다.") from error
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("야있날 릴스 결정 시한은 HH:MM 형식이어야 합니다.")
+    return policy
+
+
+def _jakkuyagu_game_cancelled(game: dict) -> bool:
+    return bool(game.get("cancel")) or str(game.get("statusCode") or "").upper() in {
+        "CANCEL",
+        "CANCELED",
+        "CANCELLED",
+    }
+
+
+def _game_start(game: dict, game_date: str) -> datetime | None:
+    value = str(game.get("gameDateTime") or game_date)
+    try:
+        scheduled = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if scheduled.tzinfo is None:
+        scheduled = scheduled.replace(tzinfo=KST)
+    return scheduled.astimezone(KST)
+
+
+def _reel_policy_alert_due(game_date: str, policy: dict) -> datetime:
+    hour, minute = (
+        int(value) for value in str(policy["reel_decision_deadline_kst"]).split(":")
+    )
+    return datetime.combine(
+        datetime.fromisoformat(game_date).date(), datetime.min.time(), tzinfo=KST
+    ).replace(hour=hour, minute=minute) + timedelta(hours=1)
 
 
 def _flow_has_reel_source(flow: dict) -> bool:
@@ -483,6 +690,16 @@ def check_gonggu(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
     )
 
     if published:
+        if _job_needs_alert_check(ledger, item):
+            _alert_once(
+                state,
+                ledger,
+                job_id,
+                "gonggu",
+                "gonggu-daily",
+                f"{today_text} 공구 일일 다이제스트",
+                now=now,
+            )
         state.pop(job_id, None)
         return
     if publication_state == "skipped":
@@ -490,6 +707,7 @@ def check_gonggu(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
             job_id,
             detail=str(status.get("detail") or "공구함 게시가 의도적으로 건너뛰어짐"),
             now=now,
+            policy=True,
         )
         state.pop(job_id, None)
         return
@@ -500,7 +718,16 @@ def check_gonggu(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
     }:
         detail = status.get("detail") if publication_state == "failed" else None
         message = detail or f"{today_text} 공구 일일 다이제스트가 마감 시각까지 게시되지 않았습니다."
-        _alert_once(state, job_id, "gonggu", "gonggu-daily", str(message))
+        _alert_once(
+            state,
+            ledger,
+            job_id,
+            "gonggu",
+            "gonggu-daily",
+            str(message),
+            now=now,
+            force_initial=publication_state == "failed",
+        )
 
 
 def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> None:
@@ -554,16 +781,19 @@ def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> 
                 published=key in posted,
                 now=now_utc,
             )
-            if item["status"] == "published":
-                state.pop(job_id, None)
-            elif item["status"] in {"missing", "recovering", "operator_required"}:
+            if _job_needs_alert_check(ledger, item):
                 _alert_once(
                     state,
+                    ledger,
                     job_id,
                     "sector4",
                     task,
-                    f"{race.get('raceName', key)} {task} 게시가 지연되어 자동 복구를 시도합니다.",
+                    f"{race.get('raceName', key)} {task}",
+                    now=now_utc,
                 )
+            if item["status"] == "published":
+                state.pop(job_id, None)
+            elif item["status"] in {"missing", "recovering", "operator_required"}:
                 if item["status"] != "operator_required":
                     missing_carousel_job = missing_carousel_job or job_id
 
@@ -591,16 +821,19 @@ def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> 
                 permalink=reel.get("permalink"),
                 now=now_utc,
             )
-            if reel_item["status"] == "published":
-                state.pop(reel_job, None)
-            elif reel_item["status"] in {"missing", "recovering", "operator_required"}:
+            if _job_needs_alert_check(ledger, reel_item):
                 _alert_once(
                     state,
+                    ledger,
                     reel_job,
                     "sector4",
                     f"{session_type}-replay-reel",
-                    f"{race.get('raceName', reel_key)} {session_type} 순위 변화 릴스가 지연되어 자동 복구를 시도합니다.",
+                    f"{race.get('raceName', reel_key)} {session_type} 순위 변화 릴스",
+                    now=now_utc,
                 )
+            if reel_item["status"] == "published":
+                state.pop(reel_job, None)
+            elif reel_item["status"] in {"missing", "recovering", "operator_required"}:
                 if reel_item["status"] != "operator_required" and missing_reel_job is None:
                     missing_reel_job = reel_job
                     missing_reel_session = session_type
@@ -677,7 +910,9 @@ def _notify_digest(title: str, body: str) -> bool:
     return response.ok
 
 
-def weekly_digest_once(state: dict, now: datetime) -> None:
+def weekly_digest_once(
+    state: dict, now: datetime, ledger: ReliabilityLedger | None = None
+) -> None:
     """일요일 21시 수집 뒤 한 번, 네 계정 성장·성과 요약을 디스코드로 보낸다."""
     week_key = f"{now.isocalendar().year}-w{now.isocalendar().week:02d}"
     if (
@@ -688,14 +923,21 @@ def weekly_digest_once(state: dict, now: datetime) -> None:
     ):
         return
     data = json.loads(INSIGHTS_PATH.read_text(encoding="utf-8"))
-    lines = build_weekly_digest_lines(data, now)
+    reliability_summary = (
+        ledger.weekly_alert_summary(now - timedelta(days=7), now) if ledger else None
+    )
+    lines = build_weekly_digest_lines(data, now, reliability_summary)
     title = f"주간 인스타 리포트 · {week_key}"
     if _notify_digest(title, "\n".join(lines)):
         state["_instagram_weekly_digest"] = week_key
         print(f"주간 다이제스트 발송: {week_key}")
 
 
-def build_weekly_digest_lines(data: dict, now: datetime) -> list[str]:
+def build_weekly_digest_lines(
+    data: dict,
+    now: datetime,
+    reliability_summary: dict[str, int] | None = None,
+) -> list[str]:
     """insights 파일에서 계정별 성장·퍼널·실험·중단 후보 요약 줄을 만든다(순수 함수)."""
     latest = data["latest"]["accounts"]
     performance_feedback = data.get("performance_feedback") or {}
@@ -710,6 +952,13 @@ def build_weekly_digest_lines(data: dict, now: datetime) -> list[str]:
         None,
     )
     lines = []
+    if reliability_summary is not None:
+        lines.append(
+            "지난주 알림 "
+            f"{reliability_summary['alerts']}건 / 실제 미게시 "
+            f"{reliability_summary['actual_missing']}건 / 정책 취소 "
+            f"{reliability_summary['policy_cancelled']}건"
+        )
     account_names = [name for name in INSIGHTS_ACCOUNTS if name in latest]
     account_names.extend(name for name in latest if name not in INSIGHTS_ACCOUNTS)
     for name in account_names:
@@ -830,7 +1079,7 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as error:  # 성과 수집 실패가 게시 침묵 감시를 막지 않는다.
         print(f"warning: Insights 수집 실패 — {type(error).__name__}: {error}")
     try:
-        weekly_digest_once(state, now)
+        weekly_digest_once(state, now, ledger)
     except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
         print(f"warning: 주간 다이제스트 실패 — {type(error).__name__}: {error}")
     _save_state(state)

@@ -189,6 +189,18 @@ class InstagramWatchdogTest(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertTrue(any("**09._.ham**" in line for line in lines))
 
+    def test_weekly_digest_starts_with_reliability_summary(self):
+        lines = watchdog.build_weekly_digest_lines(
+            {"latest": {"accounts": {}}, "history": [], "performance_feedback": {}},
+            datetime(2026, 9, 6, 21, 5, tzinfo=KST),
+            {"alerts": 9, "actual_missing": 2, "policy_cancelled": 5},
+        )
+
+        self.assertEqual(
+            lines,
+            ["지난주 알림 9건 / 실제 미게시 2건 / 정책 취소 5건"],
+        )
+
     def test_insights_collection_targets_all_four_accounts(self):
         collect = Mock(
             return_value={
@@ -224,6 +236,17 @@ class InstagramWatchdogTest(unittest.TestCase):
                         "2026-09-07:flow:game-1": {
                             "status": "published",
                             "media_id": "flow-media",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_path / "reels.json").write_text(
+                json.dumps(
+                    {
+                        "2026-09-07:reel-policy": {
+                            "stage": "reel_policy",
+                            "featured_game_ids": ["game-1"],
                         }
                     }
                 ),
@@ -427,6 +450,227 @@ class InstagramWatchdogTest(unittest.TestCase):
                 self.assertEqual(flow["status"], "cancelled")
                 self.assertEqual(flow["last_error"], "피드 발행 정책에 따라 제외")
                 self.assertEqual(reel["status"], "expected")
+                alert.assert_not_called()
+                recovery.assert_not_called()
+            finally:
+                ledger.close()
+
+    def test_alerts_only_once_while_recovering_then_once_when_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            detected_at = datetime(2026, 9, 7, 10, 0, tzinfo=KST)
+            job_id = self._missing_job(ledger)
+            try:
+                with patch.object(watchdog, "_notify", return_value=True) as notify:
+                    watchdog._alert_once(
+                        {}, ledger, job_id, "jakkuyagu", "game-flow-reel", "경기 릴스", now=detected_at
+                    )
+                    ledger.defer_recovery(job_id, detail="락 대기", now=detected_at)
+                    for tick in range(1, 5):
+                        watchdog._alert_once(
+                            {},
+                            ledger,
+                            job_id,
+                            "jakkuyagu",
+                            "game-flow-reel",
+                            "경기 릴스",
+                            now=detected_at + timedelta(minutes=15 * tick),
+                        )
+                    ledger.sync(
+                        job_id=job_id,
+                        account="jakkuyagu",
+                        content_type="game-flow-reel",
+                        source_key="2026-09-07:flow-reel:game-1",
+                        expected_at=detected_at - timedelta(hours=2),
+                        due_at=detected_at - timedelta(hours=1),
+                        published=True,
+                        now=detected_at + timedelta(hours=2),
+                    )
+                    watchdog._alert_once(
+                        {},
+                        ledger,
+                        job_id,
+                        "jakkuyagu",
+                        "game-flow-reel",
+                        "경기 릴스",
+                        now=detected_at + timedelta(hours=2),
+                    )
+
+                self.assertEqual(notify.call_count, 2)
+                self.assertIn("지연 감지·자동 복구 시작", notify.call_args_list[0].args[3])
+                self.assertIn("지연 게시 완료", notify.call_args_list[1].args[3])
+            finally:
+                ledger.close()
+
+    def test_operator_required_sends_one_final_alert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            now = datetime(2026, 9, 7, 10, 0, tzinfo=KST)
+            job_id = self._missing_job(ledger, "jujinmo:close:2026-09-07")
+            try:
+                with patch.object(watchdog, "_notify", return_value=True) as notify:
+                    watchdog._alert_once(
+                        {}, ledger, job_id, "jujinmo", "close", "종가 콘텐츠", now=now
+                    )
+                    for attempt in range(4):
+                        ledger.record_recovery(
+                            job_id,
+                            succeeded=False,
+                            detail="복구 실패",
+                            now=now + timedelta(hours=attempt + 1),
+                        )
+                    watchdog._alert_once(
+                        {},
+                        ledger,
+                        job_id,
+                        "jujinmo",
+                        "close",
+                        "종가 콘텐츠",
+                        now=now + timedelta(hours=5),
+                    )
+                    watchdog._alert_once(
+                        {},
+                        ledger,
+                        job_id,
+                        "jujinmo",
+                        "close",
+                        "종가 콘텐츠",
+                        now=now + timedelta(hours=6),
+                    )
+
+                self.assertEqual(notify.call_count, 2)
+                self.assertIn("운영자 확인 필요", notify.call_args_list[1].args[3])
+            finally:
+                ledger.close()
+
+    def test_flow_alert_waits_until_daily_policy_decision_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "jakkuyagu" / "config"
+            config_path.mkdir(parents=True)
+            (config_path / "feed_policy.json").write_text(
+                json.dumps(
+                    {
+                        "flow_per_day": 1,
+                        "reel_per_day": 0,
+                        "flow_decision_deadline_hours_after_last_first_pitch": 5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            times = ("14:00", "15:00", "16:00", "17:00", "18:30")
+            fake_kbo = types.SimpleNamespace(
+                fetch_games=lambda game_date: [
+                    {
+                        "gameId": f"game-{index}",
+                        "statusCode": "RESULT",
+                        "cancel": None,
+                        "gameDateTime": f"2026-09-07T{start}:00+09:00",
+                    }
+                    for index, start in enumerate(times, start=1)
+                ] if game_date == "2026-09-07" else []
+            )
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with (
+                    patch.dict(sys.modules, {"kbo": fake_kbo}),
+                    patch.object(watchdog, "HOME", root),
+                    patch.object(watchdog, "_alert_once") as alert,
+                    patch.object(watchdog, "_run_recovery"),
+                ):
+                    watchdog.check_jakkuyagu(
+                        {}, datetime(2026, 9, 7, 20, 0, tzinfo=KST), ledger
+                    )
+                    self.assertEqual(
+                        ledger.get("jakkuyagu:flow:game-1")["status"], "expected"
+                    )
+                    alert.assert_not_called()
+                    watchdog.check_jakkuyagu(
+                        {}, datetime(2026, 9, 8, 0, 30, tzinfo=KST), ledger
+                    )
+
+                self.assertEqual(
+                    ledger.get("jakkuyagu:flow:game-1")["status"], "missing"
+                )
+                self.assertEqual(
+                    datetime.fromisoformat(
+                        ledger.get("jakkuyagu:flow:game-1")["due_at"]
+                    ),
+                    datetime(2026, 9, 8, 0, 30, tzinfo=KST),
+                )
+            finally:
+                ledger.close()
+
+    def test_flow_per_day_zero_creates_no_flow_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "jakkuyagu" / "config"
+            config_path.mkdir(parents=True)
+            (config_path / "feed_policy.json").write_text(
+                json.dumps({"flow_per_day": 0, "reel_per_day": 0}), encoding="utf-8"
+            )
+            fake_kbo = types.SimpleNamespace(
+                fetch_games=lambda game_date: [{
+                    "gameId": "game-1",
+                    "statusCode": "RESULT",
+                    "gameDateTime": "2026-09-07T14:00:00+09:00",
+                }] if game_date == "2026-09-07" else []
+            )
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with patch.dict(sys.modules, {"kbo": fake_kbo}), patch.object(
+                    watchdog, "HOME", root
+                ):
+                    watchdog.check_jakkuyagu(
+                        {}, datetime(2026, 9, 7, 23, 0, tzinfo=KST), ledger
+                    )
+                self.assertIsNone(ledger.get("jakkuyagu:flow:game-1"))
+            finally:
+                ledger.close()
+
+    def test_reel_policy_skipped_job_is_cancelled_without_alert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "jakkuyagu" / "state"
+            state_path.mkdir(parents=True)
+            config_path = root / "jakkuyagu" / "config"
+            config_path.mkdir(parents=True)
+            (config_path / "feed_policy.json").write_text(
+                json.dumps({"flow_per_day": 0, "reel_per_day": 0}), encoding="utf-8"
+            )
+            (state_path / "reels.json").write_text(
+                json.dumps(
+                    {
+                        "2026-09-07:flow-reel:game-1": {
+                            "status": "skipped",
+                            "stage": "reel_policy",
+                            "skip_reason": "하루 대표 릴스 정책 제외",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_kbo = types.SimpleNamespace(
+                fetch_games=lambda game_date: [{
+                    "gameId": "game-1",
+                    "statusCode": "RESULT",
+                    "gameDateTime": "2026-09-07T14:00:00+09:00",
+                }] if game_date == "2026-09-07" else []
+            )
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with (
+                    patch.dict(sys.modules, {"kbo": fake_kbo}),
+                    patch.object(watchdog, "HOME", root),
+                    patch.object(watchdog, "_alert_once") as alert,
+                    patch.object(watchdog, "_run_recovery") as recovery,
+                ):
+                    watchdog.check_jakkuyagu(
+                        {}, datetime(2026, 9, 8, 1, 0, tzinfo=KST), ledger
+                    )
+                item = ledger.get("jakkuyagu:flow-reel:game-1")
+                self.assertEqual(item["status"], "cancelled")
+                self.assertEqual(item["policy_cancelled"], 1)
                 alert.assert_not_called()
                 recovery.assert_not_called()
             finally:
