@@ -418,6 +418,44 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             reel_decision.get("featured_game_ids") is not None
         )
         reel_decision_due = _reel_policy_alert_due(game_date, policy)
+        published_reels = [
+            item
+            for key, item in reels.items()
+            if str(key).startswith(f"{game_date}:")
+            and isinstance(item, dict)
+            and (item.get("status") == "published" or bool(item.get("media_id")))
+        ]
+        if games and last_start and int(policy["reel_per_day"]) > 0:
+            reel_of_day_job = f"jakkuyagu:reel-of-day:{game_date}"
+            day_end = datetime.combine(
+                datetime.fromisoformat(game_date).date(),
+                datetime.min.time(),
+                tzinfo=KST,
+            ).replace(hour=23, minute=45)
+            reel_of_day_due = min(last_start + timedelta(hours=4), day_end)
+            reel_of_day_state = ledger.sync(
+                job_id=reel_of_day_job,
+                account="jakkuyagu",
+                content_type="reel-of-day",
+                source_key=game_date,
+                expected_at=last_start,
+                due_at=reel_of_day_due,
+                published=bool(published_reels),
+                permalink=(published_reels[0].get("permalink") if published_reels else None),
+                now=now,
+            )
+            if _job_needs_alert_check(ledger, reel_of_day_state):
+                _alert_once(
+                    state,
+                    ledger,
+                    reel_of_day_job,
+                    "jakkuyagu",
+                    "reel-of-day",
+                    f"{game_date} 하루 대표 릴스 게시",
+                    now=now,
+                )
+            if reel_of_day_state["status"] == "published":
+                state.pop(reel_of_day_job, None)
         for game in games:
             game_id = str(game["gameId"])
             scheduled = _game_start(game, game_date)
@@ -435,7 +473,10 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             reel_published = reel.get("status") == "published" or bool(reel.get("media_id"))
             reel_skipped = (
                 reel.get("status") == "skipped"
-                and reel.get("stage") == REEL_POLICY_STAGE
+                and (
+                    reel.get("stage") == REEL_POLICY_STAGE
+                    or "skip_reason" in reel
+                )
             )
             flow_job = f"jakkuyagu:flow:{game_id}"
             reel_job = f"jakkuyagu:flow-reel:{game_id}"

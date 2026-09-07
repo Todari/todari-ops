@@ -175,8 +175,11 @@ EC2 호스트의 `scripts/instagram-watchdog.py`는 게시 침묵 실패를 감�
 `instagram_media_id`, `permalink`, `media_count`, `detail`, `updated_at` 필드를 읽어 매일 KST
 11:50까지 게시됐는지 감시한다. 파일이 아직 없으면 배포 전 상태로 보고 안내만 남긴다.
 공구함의 `skipped`와 야있날 flow의 `status: skipped`, `stage: feed_policy`, `skip_reason` 조합은
-의도적인 정책 제외로 ledger를 취소 처리하며 경고나 자동 복구를 하지 않는다. 야있날 릴스는
-flow의 정책 제외와 무관하게 `reels.json`의 게시 상태를 기준으로 계속 감시한다.
+의도적인 정책 제외로 ledger를 취소 처리하며 경고나 자동 복구를 하지 않는다. 야있날의 경기별
+릴스도 `reels.json`에서 `status: skipped`이고 `stage: reel_policy` 또는 `skip_reason`이 있으면
+정책 제외로 취소한다. flow의 정책 제외와 무관하게 그날 RESULT 경기가 있으면 대표 릴스 1편을
+별도 일일 잡으로 감시하며, 마지막 경기 첫 투구 +4시간과 23:45 중 이른 마감 뒤에도 게시가
+없을 때 한 번 경고한다.
 
 - 각 계정 토큰은 해당 `/home/ubuntu/<repo>/.env`에서 읽으며 결과 파일에 기록하지 않는다.
 - 게시물 조회·도달·저장·공유·반응·릴스 평균 시청 시간과 계정 프로필 조회·팔로워 수를 수집한다.
