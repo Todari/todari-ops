@@ -8,7 +8,13 @@ import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+
+try:
+    import requests  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["requests"] = types.SimpleNamespace(RequestException=Exception)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -27,6 +33,81 @@ KST = timezone(timedelta(hours=9))
 
 
 class InstagramWatchdogTest(unittest.TestCase):
+    def _missing_job(self, ledger, job_id="jakkuyagu:flow-reel:game-1"):
+        now = datetime(2026, 9, 7, 1, 0, tzinfo=timezone.utc)
+        ledger.sync(
+            job_id=job_id,
+            account="jakkuyagu",
+            content_type="game-flow-reel",
+            source_key="2026-09-07:flow-reel:game-1",
+            expected_at=now - timedelta(hours=2),
+            due_at=now - timedelta(hours=1),
+            published=False,
+            now=now,
+        )
+        return job_id
+
+    def test_recovery_exit_75_is_deferred_without_spending_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            try:
+                job_id = self._missing_job(ledger)
+                ledger.record_recovery(
+                    job_id,
+                    succeeded=True,
+                    detail="이전 정상 복구 호출",
+                    now=datetime(2026, 9, 6, 1, 0, tzinfo=timezone.utc),
+                )
+                result = types.SimpleNamespace(
+                    returncode=75,
+                    stdout="다른 야있날 생성·게시 프로세스가 실행 중 — 종료",
+                    stderr="",
+                )
+                with patch.object(watchdog.subprocess, "run", return_value=result):
+                    watchdog._run_recovery(
+                        ledger, job_id, ["python", "reel_daily.py"], cwd=Path(directory)
+                    )
+                item = ledger.get(job_id)
+                self.assertEqual(item["status"], "recovering")
+                self.assertEqual(item["recovery_attempts"], 1)
+                self.assertIn("exit=75", item["last_error"])
+            finally:
+                ledger.close()
+
+    def test_successful_recovery_keeps_existing_success_handling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            try:
+                job_id = self._missing_job(ledger)
+                result = types.SimpleNamespace(returncode=0, stdout="게시 완료", stderr="")
+                with patch.object(watchdog.subprocess, "run", return_value=result):
+                    watchdog._run_recovery(
+                        ledger, job_id, ["python", "reel_daily.py"], cwd=Path(directory)
+                    )
+                item = ledger.get(job_id)
+                self.assertEqual(item["status"], "recovering")
+                self.assertEqual(item["recovery_attempts"], 1)
+            finally:
+                ledger.close()
+
+    def test_legacy_lock_message_is_deferred_even_with_exit_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            try:
+                job_id = self._missing_job(ledger)
+                result = types.SimpleNamespace(
+                    returncode=0,
+                    stdout="다른 야있날 생성·게시 프로세스가 실행 중 — 종료",
+                    stderr="",
+                )
+                with patch.object(watchdog.subprocess, "run", return_value=result):
+                    watchdog._run_recovery(
+                        ledger, job_id, ["python", "reel_daily.py"], cwd=Path(directory)
+                    )
+                self.assertEqual(ledger.get(job_id)["recovery_attempts"], 0)
+            finally:
+                ledger.close()
+
     def test_weekly_digest_lists_funnel_and_pause_candidates(self):
         data = {
             "latest": {
@@ -83,6 +164,96 @@ class InstagramWatchdogTest(unittest.TestCase):
             "  ↳ 중단 후보 시리즈: preview(feed, 34편, 도달 중앙값 5.0)", lines
         )
         self.assertFalse(any("preview=pause_series" in line for line in lines))
+
+    def test_weekly_digest_includes_all_four_accounts(self):
+        accounts = {
+            name: {
+                "handle": handle,
+                "profile": {"followers_count": 1, "media_count": 1},
+                "account_metrics": {"metrics": {}},
+                "records": [],
+            }
+            for name, handle in (
+                ("sector4", "sector4.f1"),
+                ("yaitnal", "yaitnal"),
+                ("jujinmo", "ju.jin.mo"),
+                ("gonggu", "09._.ham"),
+            )
+        }
+
+        lines = watchdog.build_weekly_digest_lines(
+            {"latest": {"accounts": accounts}, "history": [], "performance_feedback": {}},
+            datetime(2026, 9, 6, 21, 5, tzinfo=KST),
+        )
+
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(any("**09._.ham**" in line for line in lines))
+
+    def test_insights_collection_targets_all_four_accounts(self):
+        collect = Mock(
+            return_value={
+                "latest": {
+                    "accounts": {
+                        name: {"records": []} for name in watchdog.INSIGHTS_ACCOUNTS
+                    }
+                }
+            }
+        )
+        fake_portfolio = types.SimpleNamespace(collect_portfolio=collect)
+        state = {}
+        with patch.dict(sys.modules, {"instagram_portfolio": fake_portfolio}):
+            watchdog.collect_portfolio_once(
+                state, datetime(2026, 9, 7, 21, 0, tzinfo=KST)
+            )
+
+        self.assertEqual(
+            collect.call_args.kwargs["accounts"], list(watchdog.INSIGHTS_ACCOUNTS)
+        )
+        self.assertEqual(
+            state["_instagram_insights_accounts"], list(watchdog.INSIGHTS_ACCOUNTS)
+        )
+
+    def test_yaitnal_reel_recovery_waits_for_shared_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "jakkuyagu" / "state"
+            state_path.mkdir(parents=True)
+            (state_path / "daily_content.json").write_text(
+                json.dumps(
+                    {
+                        "2026-09-07:flow:game-1": {
+                            "status": "published",
+                            "media_id": "flow-media",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_kbo = types.SimpleNamespace(
+                fetch_games=lambda game_date: [{
+                    "gameId": "game-1",
+                    "statusCode": "RESULT",
+                    "cancel": None,
+                    "gameDateTime": "2026-09-07T12:00:00+09:00",
+                }] if game_date == "2026-09-07" else []
+            )
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with (
+                    patch.dict(sys.modules, {"kbo": fake_kbo}),
+                    patch.object(watchdog, "HOME", root),
+                    patch.object(watchdog, "_alert_once"),
+                    patch.object(watchdog, "_run_recovery") as recovery,
+                ):
+                    watchdog.check_jakkuyagu(
+                        {}, datetime(2026, 9, 7, 22, 0, tzinfo=KST), ledger
+                    )
+
+                command = recovery.call_args.args[2]
+                self.assertEqual(command[-2:], ["--lock-wait", "600"])
+                self.assertEqual(recovery.call_args.kwargs["timeout"], 1800)
+            finally:
+                ledger.close()
 
     def test_graph_only_flow_is_not_scheduled_as_a_reel(self):
         with tempfile.TemporaryDirectory() as directory:

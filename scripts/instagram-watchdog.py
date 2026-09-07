@@ -11,6 +11,7 @@ EC2 호스트 크론(15분 간격)에서 /home/ubuntu/jujinmo/.venv/bin/python �
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import hmac
 import fcntl
@@ -31,6 +32,8 @@ STATE_PATH = HOME / "ops-watchdog" / "state.json"
 INSIGHTS_PATH = HOME / "ops-watchdog" / "instagram-insights.json"
 LEDGER_PATH = HOME / "ops-watchdog" / "instagram-jobs.sqlite3"
 GONGGU_STATUS_PATH = Path("/opt/gonggu-radar/data/publish_status.json")
+INSIGHTS_ACCOUNTS = ("sector4", "yaitnal", "jujinmo", "gonggu")
+RECOVERY_LOCK_MESSAGE = "다른 야있날 생성·게시 프로세스가 실행 중"
 
 JUJINMO_CONTENT_TYPES = {
     "premarket": {"premarket_hypothesis", "premarket_preview"},
@@ -160,11 +163,16 @@ def _run_recovery(
             timeout=timeout,
             check=False,
         )
-        detail = (result.stderr or result.stdout or "no output").strip()[-1000:]
+        output = "\n".join(value for value in (result.stdout, result.stderr) if value)
+        detail = output.strip()[-1000:] or "no output"
+        recovery_detail = f"exit={result.returncode}: {detail}"
+        if result.returncode == 75 or RECOVERY_LOCK_MESSAGE in output:
+            ledger.defer_recovery(job_id, detail=recovery_detail)
+            return
         ledger.record_recovery(
             job_id,
             succeeded=result.returncode == 0,
-            detail=f"exit={result.returncode}: {detail}",
+            detail=recovery_detail,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         ledger.record_recovery(
@@ -414,9 +422,11 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
                 "--game-id",
                 game_id,
                 "--publish",
+                "--lock-wait",
+                "600",
             ],
             cwd=HOME / "jakkuyagu",
-            timeout=2700,
+            timeout=1800,
         )
 
 
@@ -624,18 +634,22 @@ def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> 
 
 
 def collect_portfolio_once(state: dict, now: datetime) -> None:
-    """매일 21시 이후 한 번, 세 계정의 읽기 전용 Insights 스냅샷을 남긴다."""
+    """매일 21시 이후 한 번, 네 계정의 읽기 전용 Insights 스냅샷을 남긴다."""
     date_key = now.date().isoformat()
     if now.hour < 21 or state.get("_instagram_insights_date") == date_key:
         return
     from instagram_portfolio import collect_portfolio
 
-    payload = collect_portfolio(home=HOME, output=INSIGHTS_PATH)
+    payload = collect_portfolio(
+        home=HOME,
+        output=INSIGHTS_PATH,
+        accounts=list(INSIGHTS_ACCOUNTS),
+    )
     accounts = payload["latest"]["accounts"]
     successes = [name for name, result in accounts.items() if not result.get("error")]
     failures = [name for name, result in accounts.items() if result.get("error")]
     if not successes:
-        raise RuntimeError("세 계정 Insights 수집이 모두 실패함")
+        raise RuntimeError("네 계정 Insights 수집이 모두 실패함")
     state["_instagram_insights_date"] = date_key
     state["_instagram_insights_accounts"] = successes
     print(
@@ -664,7 +678,7 @@ def _notify_digest(title: str, body: str) -> bool:
 
 
 def weekly_digest_once(state: dict, now: datetime) -> None:
-    """일요일 21시 수집 뒤 한 번, 세 계정 성장·성과 요약을 디스코드로 보낸다."""
+    """일요일 21시 수집 뒤 한 번, 네 계정 성장·성과 요약을 디스코드로 보낸다."""
     week_key = f"{now.isocalendar().year}-w{now.isocalendar().week:02d}"
     if (
         now.weekday() != 6
@@ -696,7 +710,10 @@ def build_weekly_digest_lines(data: dict, now: datetime) -> list[str]:
         None,
     )
     lines = []
-    for name, account in latest.items():
+    account_names = [name for name in INSIGHTS_ACCOUNTS if name in latest]
+    account_names.extend(name for name in latest if name not in INSIGHTS_ACCOUNTS)
+    for name in account_names:
+        account = latest[name]
         if account.get("error"):
             lines.append(f"**{name}** — 수집 실패")
             continue
@@ -772,7 +789,23 @@ def build_weekly_digest_lines(data: dict, now: datetime) -> list[str]:
     return lines
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--reset-recovery",
+        metavar="GLOB",
+        help="미해결 작업의 복구 횟수 초기화(예: jakkuyagu:flow-reel:*)",
+    )
+    args = parser.parse_args(argv)
+    if args.reset_recovery:
+        ledger = ReliabilityLedger(LEDGER_PATH)
+        try:
+            count = ledger.reset_recovery(args.reset_recovery)
+        finally:
+            ledger.close()
+        print(f"복구 시도 초기화: {args.reset_recovery} — {count}건")
+        return
+
     now = datetime.now(KST)
     state = _load_state()
     ledger = ReliabilityLedger(LEDGER_PATH)

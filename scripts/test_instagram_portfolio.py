@@ -1,9 +1,17 @@
 import json
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+
+try:
+    import requests  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["requests"] = types.SimpleNamespace(RequestException=Exception)
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -96,6 +104,67 @@ class FakeSession:
 
 
 class InstagramPortfolioTest(unittest.TestCase):
+    def test_gonggu_config_and_sqlite_media_mapping(self):
+        row = {
+            "publication_date": "2026-09-07",
+            "instagram_media_id": "gonggu-media-1",
+            "permalink": "https://instagram.example/p/gonggu/",
+            "published_at": "2026-09-07T10:40:00+09:00",
+        }
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [row]
+        with patch.object(
+            instagram_portfolio.sqlite3, "connect", return_value=connection
+        ) as connect:
+            index = instagram_portfolio.media_index(Path("/home/ubuntu"), "gonggu")
+
+        self.assertEqual(
+            instagram_portfolio.ACCOUNT_CONFIG["gonggu"]["handle"], "09._.ham"
+        )
+        self.assertEqual(index["gonggu-media-1"]["series"], "gonggu-daily")
+        self.assertEqual(index["gonggu-media-1"]["tier"], "core")
+        self.assertEqual(index["gonggu-media-1"]["media_type"], "CAROUSEL_ALBUM")
+        self.assertEqual(index["gonggu-media-1"]["media_product_type"], "FEED")
+        self.assertIn("mode=ro", connect.call_args.args[0])
+        self.assertTrue(connect.call_args.kwargs["uri"])
+
+    def test_gonggu_env_falls_back_without_exposing_token(self):
+        with patch.object(
+            instagram_portfolio,
+            "_read_env",
+            side_effect=[
+                instagram_portfolio.PortfolioInsightsError("환경 파일 읽기 실패"),
+                {"INSTAGRAM_ACCESS_TOKEN": "secret-token"},
+            ],
+        ) as read_env:
+            env = instagram_portfolio._account_env(Path("/home/ubuntu"), "gonggu")
+
+        self.assertEqual(env["INSTAGRAM_ACCESS_TOKEN"], "secret-token")
+        self.assertEqual(read_env.call_args_list[0].args[0], Path("/etc/gonggu-radar.env"))
+        self.assertEqual(
+            read_env.call_args_list[1].args[0],
+            Path("/home/ubuntu/ops-watchdog/gonggu.env"),
+        )
+
+    def test_performance_feedback_includes_all_four_accounts(self):
+        latest = {
+            "accounts": {
+                name: {"handle": handle, "profile": {}, "account_metrics": {"metrics": {}}}
+                for name, handle in (
+                    ("sector4", "sector4.f1"),
+                    ("yaitnal", "yaitnal"),
+                    ("jujinmo", "ju.jin.mo"),
+                    ("gonggu", "09._.ham"),
+                )
+            }
+        }
+
+        feedback = instagram_portfolio.build_performance_feedback(
+            latest, {}, generated_at="2026-09-07T00:00:00+00:00"
+        )
+
+        self.assertEqual(set(feedback), {"sector4", "yaitnal", "jujinmo", "gonggu"})
+
     def _jujinmo_home(self, root: Path) -> Path:
         repo = root / "jujinmo"
         (repo / "state").mkdir(parents=True)

@@ -105,6 +105,36 @@ class ReliabilityLedgerTest(unittest.TestCase):
             self.assertEqual(ledger.unresolved(), [])
             ledger.close()
 
+    def test_deferred_recovery_preserves_attempts_and_can_be_reset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            now = datetime(2026, 9, 7, 1, 0, tzinfo=UTC)
+            job_id = "jakkuyagu:flow-reel:game-1"
+            ledger.sync(
+                job_id=job_id,
+                account="jakkuyagu",
+                content_type="game-flow-reel",
+                source_key="2026-09-07:flow-reel:game-1",
+                expected_at=now - timedelta(hours=2),
+                due_at=now - timedelta(hours=1),
+                published=False,
+                now=now,
+            )
+
+            deferred = ledger.defer_recovery(
+                job_id, detail="exit=75: 락 충돌", now=now
+            )
+            reset_count = ledger.reset_recovery("jakkuyagu:flow-reel:*", now=now)
+            reset = ledger.get(job_id)
+
+            self.assertEqual(deferred["status"], "recovering")
+            self.assertEqual(deferred["recovery_attempts"], 0)
+            self.assertEqual(reset_count, 1)
+            self.assertEqual(reset["status"], "missing")
+            self.assertEqual(reset["recovery_attempts"], 0)
+            self.assertIsNone(reset["next_recovery_at"])
+            ledger.close()
+
 
 if __name__ == "__main__":
     unittest.main()

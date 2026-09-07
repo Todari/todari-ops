@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""세 Instagram 자동화 계정의 최근 게시물 Insights를 같은 스키마로 수집한다.
+"""네 Instagram 자동화 계정의 최근 게시물 Insights를 같은 스키마로 수집한다.
 
 토큰은 각 계정 런타임의 ``.env``에서 메모리로만 읽고 결과 파일에는 쓰지 않는다.
 게시물 생성·수정·삭제 API는 호출하지 않는다.
@@ -11,13 +11,17 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:  # --help는 수집 런타임 의존성 없이도 볼 수 있어야 한다.
+    requests = None
 
 
 KST = timezone(timedelta(hours=9))
@@ -79,6 +83,16 @@ ACCOUNT_CONFIG = {
             "premarket_preview", "close_review",
         },
     },
+    "gonggu": {
+        "repo": "/opt/gonggu-radar",
+        "handle": "09._.ham",
+        "env_file": "/etc/gonggu-radar.env",
+        "env_fallback": "ops-watchdog/gonggu.env",
+        "token_key": "INSTAGRAM_ACCESS_TOKEN",
+        "publication_db": "/opt/gonggu-radar/data/gonggu-radar.sqlite3",
+        "state_files": (),
+        "core_series": {"gonggu-daily"},
+    },
 }
 
 
@@ -86,11 +100,21 @@ class PortfolioInsightsError(RuntimeError):
     """Insights 수집 설정 또는 Graph API 응답 오류."""
 
 
+def _default_session():
+    if requests is None:
+        raise PortfolioInsightsError("requests 패키지가 설치되지 않음")
+    return requests
+
+
 def _read_env(path: Path) -> dict[str, str]:
-    if not path.is_file():
-        raise PortfolioInsightsError(f"환경 파일 없음: {path}")
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise PortfolioInsightsError(f"환경 파일 없음: {path}") from error
+    except OSError as error:
+        raise PortfolioInsightsError(f"환경 파일 읽기 실패: {path}") from error
     values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in contents.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -100,6 +124,32 @@ def _read_env(path: Path) -> dict[str, str]:
             value = value[1:-1]
         values[key.strip()] = value
     return values
+
+
+def _configured_path(home: Path, value: object) -> Path:
+    path = Path(str(value))
+    return path if path.is_absolute() else home / path
+
+
+def _account_env(home: Path, account: str) -> dict[str, str]:
+    config = ACCOUNT_CONFIG[account]
+    configured = config.get("env_file")
+    if configured is None:
+        return _read_env(home / str(config["repo"]) / ".env")
+
+    candidates = [_configured_path(home, configured)]
+    fallback = config.get("env_fallback")
+    if fallback:
+        candidates.append(_configured_path(home, fallback))
+    errors = []
+    for path in candidates:
+        try:
+            return _read_env(path)
+        except PortfolioInsightsError as error:
+            errors.append(str(error))
+    raise PortfolioInsightsError(
+        f"{account}: 환경 파일을 읽을 수 없음 ({'; '.join(errors)})"
+    )
 
 
 def _json(path: Path) -> Any:
@@ -141,6 +191,8 @@ def _series_for(account: str, source_key: str, item: dict[str, Any]) -> str:
 
 def media_index(home: Path, account: str) -> dict[str, dict[str, Any]]:
     config = ACCOUNT_CONFIG[account]
+    if account == "gonggu":
+        return _gonggu_media_index(home, config)
     repo = home / str(config["repo"])
     found: dict[str, dict[str, Any]] = {}
     for relative in config["state_files"]:
@@ -166,10 +218,48 @@ def media_index(home: Path, account: str) -> dict[str, dict[str, Any]]:
     return found
 
 
+def _gonggu_media_index(
+    home: Path, config: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    database = _configured_path(home, config["publication_db"])
+    try:
+        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT publication_date, instagram_media_id, permalink, published_at
+                FROM instagram_publications
+                WHERE account_username=? AND instagram_media_id IS NOT NULL
+                """,
+                (config["handle"],),
+            ).fetchall()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error) as error:
+        raise PortfolioInsightsError(
+            f"gonggu: 발행 DB 읽기 실패: {database}"
+        ) from error
+    return {
+        str(row["instagram_media_id"]): {
+            "source_key": str(row["publication_date"]),
+            "series": "gonggu-daily",
+            "tier": "core",
+            "media_type": "CAROUSEL_ALBUM",
+            "media_product_type": "FEED",
+            "published_at": row["published_at"],
+            "permalink": row["permalink"],
+        }
+        for row in rows
+    }
+
+
 def _graph_get(session, url: str, *, params: dict[str, Any]) -> dict[str, Any]:
     try:
         response = session.get(url, params=params, timeout=25)
-    except requests.RequestException as error:
+    except Exception as error:
+        if requests is not None and not isinstance(error, requests.RequestException):
+            raise
         raise PortfolioInsightsError(
             f"Graph API 네트워크 오류: {type(error).__name__}"
         ) from error
@@ -253,18 +343,20 @@ def collect_account(
     home: Path,
     account: str,
     *,
-    session=requests,
+    session=None,
     days: int = 14,
     limit: int = 100,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    if session is None:
+        session = _default_session()
     config = ACCOUNT_CONFIG[account]
-    repo = home / str(config["repo"])
-    env = _read_env(repo / ".env")
-    token = env.get("IG_ACCESS_TOKEN", "")
+    env = _account_env(home, account)
+    token_key = str(config.get("token_key") or "IG_ACCESS_TOKEN")
+    token = env.get(token_key, "")
     if not token:
-        raise PortfolioInsightsError(f"{account}: IG_ACCESS_TOKEN 없음")
+        raise PortfolioInsightsError(f"{account}: {token_key} 없음")
     version = env.get("IG_GRAPH_VERSION", "v23.0")
     graph = f"https://graph.instagram.com/{version}"
     errors = []
@@ -780,7 +872,11 @@ def build_performance_feedback(
     """실제 반응을 다음 생성기가 읽을 수 있는 계정·시리즈별 컨텍스트로 바꾼다."""
     feedback: dict[str, Any] = {}
     generated_date = datetime.fromisoformat(generated_at).date()
-    for account, account_samples in media_samples.items():
+    latest_accounts = latest.get("accounts") or {}
+    account_names = list(latest_accounts)
+    account_names.extend(account for account in media_samples if account not in latest_accounts)
+    for account in account_names:
+        account_samples = media_samples.get(account) or {}
         if not isinstance(account_samples, dict):
             continue
         by_series: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -888,7 +984,7 @@ def collect_portfolio(
     home: Path = DEFAULT_HOME,
     output: Path = DEFAULT_OUTPUT,
     accounts: list[str] | None = None,
-    session=requests,
+    session=None,
     days: int = 14,
     now: datetime | None = None,
 ) -> dict[str, Any]:

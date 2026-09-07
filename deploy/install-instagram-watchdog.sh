@@ -23,7 +23,7 @@ ssh "${SSH_OPTS[@]}" "$EC2_HOST" '
   cp /home/ubuntu/ops-watchdog/instagram-watchdog.py /home/ubuntu/ops-watchdog/watchdog.py
   chmod 700 /home/ubuntu/ops-watchdog/watchdog.py
   (crontab -l 2>/dev/null | grep -v "/home/ubuntu/ops-watchdog/instagram-watchdog.py" | grep -v "/home/ubuntu/ops-watchdog/watchdog.py" || true
-   echo "7,22,37,52 * * * * /home/ubuntu/jujinmo/.venv/bin/python /home/ubuntu/ops-watchdog/watchdog.py >> /home/ubuntu/ops-watchdog/watchdog.log 2>&1") | crontab -
+   echo "7,22,37,52 * * * * flock -n /tmp/ops-watchdog.lock /home/ubuntu/jujinmo/.venv/bin/python /home/ubuntu/ops-watchdog/watchdog.py >> /home/ubuntu/ops-watchdog/watchdog.log 2>&1") | crontab -
 '
 
 echo "Instagram watchdog + portfolio insights installed"

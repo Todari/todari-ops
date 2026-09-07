@@ -166,6 +166,51 @@ class ReliabilityLedger:
         self.connection.commit()
         return self.get(job_id) or {}
 
+    def defer_recovery(
+        self,
+        job_id: str,
+        *,
+        detail: str,
+        now: datetime | None = None,
+        delay_minutes: int = 5,
+    ) -> dict:
+        """일시적인 외부 락 충돌은 시도 횟수를 쓰지 않고 다음 틱으로 미룬다."""
+        now = now or datetime.now(timezone.utc)
+        if not self.get(job_id):
+            raise KeyError(job_id)
+        next_at = now + timedelta(minutes=max(0, delay_minutes))
+        self.connection.execute(
+            """
+            UPDATE jobs
+            SET status='recovering', next_recovery_at=?, last_error=?, updated_at=?
+            WHERE job_id=?
+            """,
+            (next_at.isoformat(), detail[:1000], now.isoformat(), job_id),
+        )
+        self.connection.commit()
+        return self.get(job_id) or {}
+
+    def reset_recovery(
+        self,
+        pattern: str,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """GLOB 패턴과 일치하는 미해결 작업의 복구 횟수를 운영자가 초기화한다."""
+        now = now or datetime.now(timezone.utc)
+        cursor = self.connection.execute(
+            """
+            UPDATE jobs
+            SET status='missing', recovery_attempts=0, next_recovery_at=NULL,
+                last_error='운영자 복구 시도 초기화', updated_at=?
+            WHERE job_id GLOB ?
+              AND status IN ('missing', 'recovering', 'operator_required')
+            """,
+            (now.isoformat(), pattern),
+        )
+        self.connection.commit()
+        return cursor.rowcount
+
     def cancel(
         self,
         job_id: str,
