@@ -42,7 +42,17 @@ export const commands = [
         ),
     ),
   new SlashCommandBuilder().setName("cancel").setDescription("Cancel the running turn in this thread"),
-  new SlashCommandBuilder().setName("end").setDescription("End and clean up this thread's session"),
+  new SlashCommandBuilder()
+    .setName("end")
+    .setDescription("세션 종료. 완료를 선택한 경우에만 원본 할 일도 완료 처리")
+    .addStringOption((opt) => opt
+      .setName("result")
+      .setDescription("종료 결과 (기본: 보류)")
+      .addChoices(
+        { name: "보류 — 할 일 유지 (기본)", value: "paused" },
+        { name: "완료 — 검증을 끝낸 작업", value: "completed" },
+        { name: "중단 — 할 일 유지", value: "abandoned" },
+      )),
   new SlashCommandBuilder().setName("ping").setDescription("Health check"),
   new SlashCommandBuilder().setName("digest").setDescription("Post today's digest now"),
   new SlashCommandBuilder()

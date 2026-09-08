@@ -17,7 +17,7 @@ import { postDigest } from "../digest/daily.js";
 import { postWeekly } from "../digest/weekly.js";
 import { postCheckinPrompt } from "../checkin/index.js";
 import { addReminder, parseFireAt } from "../reminders/index.js";
-import { getUptimeSnapshot } from "../monitor/uptime.js";
+import { formatUptimeSnapshot, getUptimeSnapshot } from "../monitor/uptime.js";
 import { listSessions } from "../storage/sessions.js";
 import {
   collectDeadlines,
@@ -423,10 +423,7 @@ function buildStatusText(): string {
     lines.push(
       "",
       "**서비스**",
-      ...uptime.map(
-        (item) =>
-          `${item.up ? "🟢" : "🔴"} ${item.slug} (${item.detail})`,
-      ),
+      formatUptimeSnapshot(uptime),
     );
   }
 

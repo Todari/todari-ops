@@ -1,7 +1,7 @@
 import { connect as tlsConnect } from "node:tls";
 import { resolveNs } from "node:dns/promises";
 import { EmbedBuilder } from "discord.js";
-import { projects } from "../projects.js";
+import { getHealthTargets } from "../projects.js";
 import { fetchAlertsChannel } from "../discord/alerts.js";
 import { env } from "../env.js";
 import { captureException } from "../observability/sentry.js";
@@ -28,9 +28,8 @@ function targets(): { domains: string[]; hosts: string[] } {
   const hosts = new Set<string>();
   const domains = new Set<string>();
   if (BOT_HOST) hosts.add(BOT_HOST);
-  for (const p of projects) {
-    if (!p.healthUrl) continue;
-    const host = new URL(p.healthUrl).hostname;
+  for (const target of getHealthTargets()) {
+    const host = new URL(target.url).hostname;
     hosts.add(host);
     if (!host.endsWith(".vercel.app")) domains.add(registrableDomain(host));
   }

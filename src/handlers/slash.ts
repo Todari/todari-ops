@@ -5,14 +5,12 @@ import {
   ChannelType,
   MessageFlags,
   type ChatInputCommandInteraction,
-  type ThreadChannel,
 } from "discord.js";
 import { env } from "../env.js";
 import { findProject } from "../projects.js";
 import {
   getSession,
   updatePermissionMode,
-  endSession,
   type PermissionMode,
 } from "../storage/sessions.js";
 import { EmbedBuilder } from "discord.js";
@@ -20,10 +18,10 @@ import { cancelActiveTurn, isTurnActive } from "../agent/run.js";
 import { spawnSessionThread } from "../agent/bootstrap.js";
 import { postDigest } from "../digest/daily.js";
 import { postWeekly } from "../digest/weekly.js";
-import { getUptimeSnapshot } from "../monitor/uptime.js";
+import { getUptimeSnapshot, formatUptimeSnapshot } from "../monitor/uptime.js";
 import { listSessions } from "../storage/sessions.js";
 import { addReminder, parseFireAt } from "../reminders/index.js";
-import { postSessionSummary } from "../agent/summary.js";
+import { closeCodeSession } from "../agent/end-session.js";
 import { postCheckinPrompt } from "../checkin/index.js";
 import {
   collectDeadlines,
@@ -34,9 +32,6 @@ import {
 import { answerQuestion, correctSentence } from "../jp/tutor.js";
 import { dueCards, insertMistake } from "../jp/cards.js";
 import { captureOutcomeText, captureToVault } from "../vault/capture.js";
-import { completeVaultTask, type VaultTaskRef } from "../vault/mutations.js";
-import { completeCapturedVaultTask } from "../vault/state.js";
-import { captureException } from "../observability/sentry.js";
 
 export async function handleSlash(interaction: ChatInputCommandInteraction): Promise<void> {
   if (interaction.user.id !== env.OWNER_DISCORD_ID) {
@@ -153,39 +148,9 @@ async function handleEnd(interaction: ChatInputCommandInteraction): Promise<void
     return;
   }
   const thread = interaction.channel;
-  const session = await getSession(interaction.channelId);
-  await interaction.reply({ content: "🏁 세션 종료" });
-  // 세션 요약(재사용 가치 추출)은 종료 후 백그라운드로 — 메타 삭제 전에
-  // session 객체를 잡아뒀으므로 resume 에 필요한 sessionId 는 살아있다.
-  if (session?.sessionId && thread.isThread()) {
-    void postSessionSummary(thread, session);
-  }
-  if (session?.sourceTask && thread.isThread()) {
-    void finishSourceTask(thread, session.sourceTask);
-  }
-  await endSession(interaction.channelId);
-}
-
-async function finishSourceTask(
-  thread: ThreadChannel,
-  sourceTask: VaultTaskRef,
-): Promise<void> {
-  try {
-    const result = await completeVaultTask(sourceTask);
-    if (result.changed) {
-      await completeCapturedVaultTask(
-        sourceTask.note,
-        sourceTask.projectSlug,
-        sourceTask.text,
-      );
-      await thread.send(`✅ 볼트 할 일도 완료 처리했어요 — ${result.path ?? sourceTask.note}`);
-    } else {
-      await thread.send(`ℹ️ 볼트 체크박스는 이미 완료됐거나 찾지 못했어요 — ${sourceTask.text}`);
-    }
-  } catch (err) {
-    captureException(err, { kind: "vault-task-finish", projectSlug: sourceTask.projectSlug });
-    await thread.send("⚠️ 코드 세션은 종료했지만 볼트 완료 체크에 실패했어요. 태스크는 열린 상태로 유지합니다.");
-  }
+  await interaction.deferReply();
+  const result = await closeCodeSession(thread, interaction.options.getString("result"));
+  await interaction.editReply({ content: result.message });
 }
 
 async function handleDigest(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -220,7 +185,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction): Promise<v
   if (uptime.length > 0) {
     embed.addFields({
       name: "uptime",
-      value: uptime.map((u) => `${u.up ? "🟢" : "🔴"} ${u.slug} (${u.detail})`).join("\n"),
+      value: formatUptimeSnapshot(uptime),
     });
   }
 

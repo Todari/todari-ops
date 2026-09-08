@@ -23,6 +23,18 @@ interface ActiveTurn {
 }
 
 const activeTurns = new Map<string, ActiveTurn>();
+const endingSessions = new Set<string>();
+
+export function beginSessionEnd(threadId: string): "locked" | "active" | "ending" {
+  if (activeTurns.has(threadId)) return "active";
+  if (endingSessions.has(threadId)) return "ending";
+  endingSessions.add(threadId);
+  return "locked";
+}
+
+export function releaseSessionEnd(threadId: string): void {
+  endingSessions.delete(threadId);
+}
 
 export interface StartTurnArgs {
   threadId: string;
@@ -38,6 +50,10 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
   }
 
   const existing = activeTurns.get(args.threadId);
+  if (endingSessions.has(args.threadId)) {
+    await thread.send("⏳ 세션 종료 처리 중입니다. 처리 결과를 기다려 주세요.");
+    return;
+  }
   if (existing) {
     if (existing.pendingPrompt) {
       await thread.send(
@@ -85,6 +101,8 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
   }
 
   const abort = new AbortController();
+  // A close request can arrive while getSession above is awaited.
+  if (endingSessions.has(args.threadId)) return;
   activeTurns.set(args.threadId, { abort, pendingPrompt: null });
 
   try {

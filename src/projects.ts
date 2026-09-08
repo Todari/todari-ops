@@ -1,3 +1,10 @@
+export interface ProjectHealthCheck {
+  id: string;
+  name: string;
+  url: string;
+  expectJson?: Record<string, string | number | boolean>;
+}
+
 export interface ProjectConfig {
   slug: string;
   name: string;
@@ -6,8 +13,10 @@ export interface ProjectConfig {
   repoUrl: string;
   defaultBranch: string;
   description?: string;
-  /** Production URL polled by the uptime monitor. Omit = not monitored. */
+  /** Default production URL, also used for the Vercel post-deploy smoke check. */
   healthUrl?: string;
+  /** Additional independently monitored components, optionally validating JSON. */
+  healthChecks?: ProjectHealthCheck[];
   /** Extra Vercel project names when they differ from slug/repo basename. */
   vercelNames?: string[];
 }
@@ -24,6 +33,9 @@ export const projects: ProjectConfig[] = [
     aliases: ["닭발헌터", "give-me-a-chicken-foot"],
     repoUrl: "https://github.com/Todari/give-me-a-chicken-foot.git",
     defaultBranch: "main",
+    healthChecks: [{
+      id: "api", name: "API", url: "https://dakbal.pro/api/health", expectJson: { ok: true },
+    }],
     description: "엽떡 닭발 재고 파인더 (Next.js + Playwright)",
   },
   {
@@ -44,6 +56,10 @@ export const projects: ProjectConfig[] = [
     repoUrl: "https://github.com/Todari/metro-nomedeul.git",
     defaultBranch: "main",
     healthUrl: "https://metronome.todari.dev",
+    healthChecks: [{
+      id: "api", name: "API", url: "https://api.metronome.todari.dev/health",
+      expectJson: { status: "ok", db: "ok" },
+    }],
     description: "실시간 협업 메트로놈 (Socket.IO + NestJS)",
   },
   {
@@ -116,6 +132,32 @@ export const projects: ProjectConfig[] = [
     description: "이 봇 자체 — 봇이 자기 자신을 고칠 수 있게. 리모트가 아직 없으면 /code 가 clone 실패함",
   },
 ];
+
+export interface HealthTarget {
+  /** Keeps the legacy slug key for healthUrl; additional checks use slug:id. */
+  key: string;
+  slug: string;
+  name: string;
+  checkName: string | null;
+  url: string;
+  expectJson?: ProjectHealthCheck["expectJson"];
+}
+
+export function getHealthTargets(configs: readonly ProjectConfig[] = projects): HealthTarget[] {
+  return configs.flatMap((project) => {
+    const targets: HealthTarget[] = project.healthUrl ? [{
+      key: project.slug, slug: project.slug, name: project.name,
+      checkName: project.healthChecks?.length ? "기본" : null, url: project.healthUrl,
+    }] : [];
+    for (const check of project.healthChecks ?? []) {
+      targets.push({
+        key: `${project.slug}:${check.id}`, slug: project.slug, name: project.name,
+        checkName: check.name, url: check.url, expectJson: check.expectJson,
+      });
+    }
+    return targets;
+  });
+}
 
 export function findProject(slug: string): ProjectConfig | undefined {
   const query = slug.trim().toLowerCase();

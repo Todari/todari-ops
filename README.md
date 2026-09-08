@@ -42,8 +42,10 @@ Discord 명령/메시지
 - 일간 digest, 주간 요약, 리마인더, 저녁 check-in을 Discord에 게시합니다.
 - `/task`, `/idea`는 Obsidian 볼트에 즉시 커밋하고 `/note`는 관련 문서를 찾아 제한된
   범위에서 바로 편집합니다. 충돌하면 Discord 인박스가 안전 큐 역할을 합니다.
-- digest의 할 일에서 코딩 세션을 시작하고, 검증 후 `/end`하면 원본 볼트 체크박스도
-  자동으로 완료합니다.
+- digest의 할 일에서 코딩 세션을 시작하고, 검증 후 `/end result:completed`를 선택하면
+  원본 볼트 체크박스도 완료합니다. `/end`의 기본값은 보류이며, `paused`·`abandoned`는
+  원본 할 일을 열린 상태로 유지합니다. 실행 중인 세션은 `/cancel` 후 종료할 수 있고,
+  원본 완료 기록에 실패하면 세션을 유지해 재시도할 수 있습니다.
 - Obsidian 할 일·일정, 세션 회고와 일간·주간 브리핑을 연결합니다.
 - 세션 메타데이터와 Claude 대화 상태를 볼륨에 보존해 재배포 뒤에도 이어갑니다.
 
@@ -118,6 +120,9 @@ pnpm dev
 ## 프로젝트 카탈로그 바꾸기
 
 `src/projects.ts`에서 `/code`가 찾을 저장소, 기본 branch, 별칭, health URL을 정의합니다.
+`healthUrl`은 기본 감시와 Vercel 배포 직후 smoke check에 사용하며, 별도 API·DB 상태는
+`healthChecks`로 독립 감시할 수 있습니다. `expectJson`을 지정하면 HTTP 상태뿐 아니라
+JSON의 최상위 필드 값과 타입도 모두 일치해야 정상입니다.
 
 ```ts
 {
@@ -127,8 +132,20 @@ pnpm dev
   repoUrl: "https://github.com/example/example.git",
   defaultBranch: "main",
   healthUrl: "https://example.com/health",
+  healthChecks: [{
+    id: "api",
+    name: "API",
+    url: "https://api.example.com/health",
+    expectJson: { status: "ok", db: "ok" },
+  }],
 }
 ```
+
+현재 메트로놈은 `metronome.todari.dev` 웹과 `api.metronome.todari.dev/health`의 API·DB를
+분리해서 확인하고, 닭발 헌터는 `dakbal.pro/api/health`의 `ok: true`를 확인합니다.
+`/status`·일간 digest·자연어 상태 조회는 정상/장애/미확인/오래됨과 마지막 검사 경과 시간을
+함께 표시합니다. 검사 전·비활성화·첫 실패를 정상으로 표시하지 않으며, 검사 결과가
+`UPTIME_INTERVAL_MS × 2 + 30초`보다 오래되면 과거 결과로 표시합니다.
 
 private 코드 저장소만 쓰면 `GITHUB_TOKEN`에 Contents 읽기 권한이면 충분합니다. 볼트 즉시
 기록을 쓰려면 `VAULT_REPO_URL` 저장소에는 Contents 읽기·쓰기 권한이 필요합니다. Mac의

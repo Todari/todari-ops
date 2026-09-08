@@ -17,6 +17,7 @@ const TIL_TTL_MS = 24 * 3600_000;
 export async function postSessionSummary(
   thread: ThreadChannel,
   session: Session,
+  outcome = "종료",
 ): Promise<void> {
   try {
     const project = findProject(session.projectSlug);
@@ -39,7 +40,7 @@ export async function postSessionSummary(
     try {
       for await (const message of query({
         prompt:
-          "이 세션을 마무리한다. 도구 없이 답만: ①무엇을 했는지 ②재사용 가치가 있는 배움·삽질 포인트(있다면 문제→원인→해결 구조로) 를 합쳐 6줄 이내 한국어로 요약해줘.",
+          `이 세션의 종료 결과는 '${outcome}'이다. 보류·중단이면 작업이 완료됐다고 추정하지 말 것. 도구 없이 답만: ①무엇을 했는지와 남은 일 ②재사용 가치가 있는 배움·삽질 포인트(있다면 문제→원인→해결 구조로)를 합쳐 6줄 이내 한국어로 요약해줘.`,
         options,
       })) {
         const m = message as { type?: string; result?: string };
