@@ -265,9 +265,15 @@ curl --fail http://127.0.0.1:3100/healthz
 ```bash
 pnpm typecheck
 pnpm test
+pnpm test:sdk
 pnpm test:python
 pnpm build
 ```
+
+SDK 업데이트는 실제 SDK를 사용하는 파일 권한·권한 확인·세션 재개 회귀 테스트로 검증합니다.
+`test:sdk`는 인증정보 없이 번들 CLI의 `--version`을 실행합니다. CI(Linux)와 Docker 이미지
+빌드(Alpine/musl)에서도 실행해 플랫폼별 실행파일 누락·기동 실패를 배포 전에 감지합니다.
+Docker 설치는 잠금 파일 불일치 시 실패하며, 임의 버전으로 다시 설치하지 않습니다.
 
 주요 디렉터리:
 

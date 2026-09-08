@@ -9,7 +9,9 @@ FROM base AS deps
 # pnpm-workspace.yaml carries build-script approvals (allowBuilds) — without
 # it pnpm 11 hard-fails install with ERR_PNPM_IGNORED_BUILDS.
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile || pnpm install
+COPY scripts/check_sdk_cli.mjs ./scripts/check_sdk_cli.mjs
+# Never silently re-resolve security-reviewed dependency versions in production.
+RUN pnpm install --frozen-lockfile && pnpm test:sdk
 
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
