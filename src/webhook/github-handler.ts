@@ -30,6 +30,8 @@ interface GithubWorkflowRun {
   conclusion?: string;
   html_url?: string;
   head_branch?: string;
+  head_sha?: string;
+  run_attempt?: number;
   head_commit?: { message?: string };
 }
 
@@ -157,7 +159,7 @@ async function handleWorkflowRun(
   run: GithubWorkflowRun,
 ): Promise<void> {
   if (action !== "completed" || run.conclusion !== "failure") return;
-  if (shouldDrop(`gh:run:${fullName}:${run.id}`)) return;
+  if (shouldDrop(`gh:run:${fullName}:${run.id}:${run.run_attempt ?? 1}`)) return;
   recordEvent("ci_fail", project.slug);
 
   const channel = await fetchAlertsChannel();
@@ -167,9 +169,10 @@ async function handleWorkflowRun(
     "[CI 실패 트리아지]",
     `프로젝트: ${project.name} (${project.slug})`,
     `워크플로: ${run.name ?? "?"} / 브랜치: ${run.head_branch ?? "?"}`,
+    `실패 head SHA: ${run.head_sha ?? "(없음)"} / 실행 회차: ${run.run_attempt ?? "(없음)"}`,
     run.html_url ? `URL: ${run.html_url}` : "",
     "",
-    "최근 커밋(git log)을 보고 실패 원인을 추정해줘. GitHub API 가 필요하면",
+    "현재 checkout은 실패 head SHA와 다를 수 있다. 위 SHA와 실패 job/step 로그를 먼저 확인하고 진단해줘. GitHub API 가 필요하면",
     "`curl -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/...` 를 쓸 수 있다.",
   ]
     .filter((l) => l !== "")
@@ -209,9 +212,10 @@ async function handleWorkflowRun(
     project,
     title: `CI 실패: ${run.name ?? "workflow"}`,
     alertMessage,
+    source: { kind: "github-workflow", runId: run.id, headSha: run.head_sha, runAttempt: run.run_attempt },
     prompt: [
-      "[읽기 전용 사전 진단] 코드를 수정하지 말 것. 네트워크 접근 없이 git log/코드만으로",
-      "아래 CI 실패의 원인을 조사해서 ①원인 가설 ②근거 ③수정 방향을 8줄 이내 한국어로.",
+      "[읽기 전용 사전 진단] 코드를 수정하지 말 것. 고정한 SHA의 코드와 사전 수집된 실패 job/step/로그로",
+      "아래 CI 실패를 조사해서 ①원인 가설 ②근거와 SHA ③수정 방향 ④부족한 정보를 8줄 이내 한국어로.",
       "",
       `프로젝트: ${project.name} (${project.slug})`,
       `워크플로: ${run.name ?? "?"} / 브랜치: ${run.head_branch ?? "?"}`,

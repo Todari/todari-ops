@@ -29,6 +29,7 @@
     "start": "node dist/bot.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:python": "python3 -B -m unittest discover -s scripts -p 'test_instagram*.py'",
     "db:init": "psql \"$AUDIT_DB_URL\" -f src/storage/schema.sql"
   },
   "engines": {

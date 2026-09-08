@@ -113,7 +113,7 @@ pnpm dev
 | `INSTAGRAM_WEBHOOK_SECRET` | 빈 값 | Instagram 게시기와 공유하는 HMAC 시크릿 |
 | `BOT_PUBLIC_HOST` | Todari 운영 host | 봇 자체 domain/TLS 감시 대상 |
 | `VAULT_REPO_URL` | Todari vault repository | 읽기·즉시 기록에 사용할 private Obsidian 저장소 |
-| `WEBHOOK_ENABLED` | `true` | HTTP webhook server 활성화 |
+| `WEBHOOK_ENABLED` | `true` | 수신 웹훅 활성화 (`/healthz`는 항상 제공) |
 
 ## 프로젝트 카탈로그 바꾸기
 
@@ -136,13 +136,20 @@ Obsidian Git도 주기적인 pull/push와 `pull before push`를 켜 두어 양�
 패키지의 `private: true`는 GitHub 공개 범위와 무관하며, 실수로 npm에 배포되는 것을 막기 위한
 설정입니다.
 
+CI 자동 진단의 실패 job·step·로그 수집에는 해당 저장소의 Actions 읽기 권한도 필요합니다.
+실패 이벤트의 커밋 SHA와 실행 회차에 맞는 로그를 최대 3개 job·각 4,000자·30초 한도로
+수집하고 민감정보를 마스킹합니다. 권한이나 로그가 없으면 부족한 근거를 명시합니다.
+진단은 요청별 임시 checkout에서 실행하고 종료 후 정리해 기존 `/code` 작업을 보존합니다.
+Sentry release가 해당 저장소의 Git SHA로 확인되면 그 커밋을 사용하고, 확인할 수 없으면
+최신 기본 브랜치의 실제 SHA를 사용했다는 사실을 진단에 표시합니다.
+
 ## Webhook
 
 HTTP server는 다음 endpoint를 제공합니다.
 
 | Endpoint | 검증 |
 | --- | --- |
-| `GET /healthz` | 없음 |
+| `GET /healthz` | 없음. 초기화·Discord 연결·주기 감시 상태 정상 시 200, 준비 전/연결 해제/감시 정체 시 503 |
 | `POST /webhook/sentry/:slug` | `SENTRY_WEBHOOK_SECRET` |
 | `POST /webhook/github` | `GITHUB_WEBHOOK_SECRET` |
 | `POST /webhook/vercel` | `VERCEL_WEBHOOK_SECRET` |
@@ -151,6 +158,13 @@ HTTP server는 다음 endpoint를 제공합니다.
 
 외부에 노출할 때는 nginx, Caddy 같은 reverse proxy에서 TLS를 종료하고 bot port는 loopback에만
 bind하는 구성을 권장합니다.
+
+`/healthz`의 `checks`는 초기화, 모든 Discord gateway 연결, 활성화된 uptime·Linux 리소스 감시의
+마지막 완료 시각을 보여줍니다. 감시가 첫 실행을 완료하지 않았거나 마지막 완료 이후
+`검사 주기 × 2 + 30초`가 지나면 정상으로 판정하지 않습니다. 대상 서비스의 장애와
+감시기 자체의 정체는 구분합니다. 인스타그램 호스트 워치독과 일간 예약 작업의
+실행 여부는 이 endpoint에 포함되지 않습니다. Docker는 이 endpoint로 상태를 확인하며,
+컨테이너가 `unhealthy`라고 해서 자동 재시작되는 것은 아닙니다.
 
 ```nginx
 server {
@@ -221,7 +235,11 @@ docker compose --env-file .env.production up -d --build
 curl --fail http://127.0.0.1:3100/healthz
 ```
 
-기본 GitHub Actions workflow는 `main` push에서 typecheck 후 SSH/rsync 배포를 수행합니다.
+기본 GitHub Actions workflow는 PR과 `main` push에서 타입체크, TypeScript·Python 테스트,
+빌드를 수행합니다. 배포는 `main` push 또는 수동 실행에서만 SSH/rsync로 진행하고,
+컨테이너의 실제 healthcheck 통과까지 최대 180초 기다린 뒤 성공으로 처리합니다.
+수동 실행의 브랜치가 달라도 같은 서버로의 배포는 한 번에 하나씩 실행합니다.
+인스타그램 호스트 워치독은 위의 별도 설치 스크립트로 갱신해야 합니다.
 사용하려면 `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS` repository secret을 설정하세요.
 다른 배포 방식을 쓴다면 workflow를 비활성화하거나 교체하면 됩니다.
 
@@ -230,6 +248,7 @@ curl --fail http://127.0.0.1:3100/healthz
 ```bash
 pnpm typecheck
 pnpm test
+pnpm test:python
 pnpm build
 ```
 

@@ -17,6 +17,7 @@ import { startWeeklySummary } from "./digest/weekly.js";
 import { startReminders } from "./reminders/index.js";
 import { startEveningCheckin } from "./checkin/index.js";
 import { scheduleJpPush } from "./jp/daily-push.js";
+import { runtimeHealth } from "./monitor/health.js";
 
 assertEnv();
 
@@ -30,13 +31,13 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const client = createClient();
+// Health is available even when inbound webhook routes are disabled.
+startWebhookServer();
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`[bot] logged in as ${c.user.tag}`);
   console.log(`[bot] WORK_DIR=${env.WORK_DIR}`);
   await registerSlashCommands(env.DISCORD_APP_ID, env.DISCORD_GUILD_ID);
-  if (env.WEBHOOK_ENABLED) startWebhookServer();
-  else console.log("[webhook] disabled (WEBHOOK_ENABLED=false)");
   startUptimeMonitor();
   startResourceMonitor();
   startExpiryMonitor();
@@ -45,6 +46,7 @@ client.once(Events.ClientReady, async (c) => {
   startReminders();
   startEveningCheckin();
   scheduleJpPush(c);
+  runtimeHealth.markInitialized();
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {

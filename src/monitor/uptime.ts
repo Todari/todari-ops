@@ -7,6 +7,7 @@ import { projects, type ProjectConfig } from "../projects.js";
 import { fetchAlertsChannel } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
 import { recordEvent } from "../stats/events.js";
+import { runtimeHealth } from "./health.js";
 
 // Polls every project with a healthUrl. Two consecutive failures → down alert
 // (once), first success afterwards → recovery alert with downtime duration.
@@ -74,6 +75,7 @@ export function startUptimeMonitor(): void {
     return;
   }
   started = true;
+  runtimeHealth.expectCheck("uptime", env.UPTIME_INTERVAL_MS);
   loadPersistedStates();
   console.log(
     `[uptime] monitoring ${targets.length} targets every ${Math.round(env.UPTIME_INTERVAL_MS / 1000)}s`,
@@ -107,6 +109,7 @@ export function getUptimeSnapshot(): UptimeSnapshotEntry[] {
 
 async function sweep(targets: Array<ProjectConfig & { healthUrl: string }>): Promise<void> {
   await Promise.allSettled(targets.map((t) => check(t)));
+  runtimeHealth.completeCheck("uptime");
 }
 
 async function check(p: ProjectConfig & { healthUrl: string }): Promise<void> {

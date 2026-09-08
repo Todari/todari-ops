@@ -3,10 +3,15 @@ name: deploy
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: deploy-todari-ops
+  group: deploy-todari-ops-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -21,9 +26,21 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm test
+        env:
+          DOTENV_CONFIG_PATH: /dev/null
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm test:python
+      - run: pnpm build
 
   deploy:
     needs: typecheck
+    if: github.event_name != 'pull_request'
+    concurrency:
+      group: deploy-todari-ops-production
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     env:
       EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -56,11 +73,11 @@ jobs:
       - name: Build and restart containers
         run: |
           ssh -i ~/.ssh/id_deploy "$EC2_HOST" \
-            'cd ~/todari-ops && docker compose --env-file .env.production up -d --build'
+            'cd ~/todari-ops && docker compose --env-file .env.production up -d --build --wait --wait-timeout 180'
 
   notify:
     needs: [typecheck, deploy]
-    if: always()
+    if: always() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Notify Discord (deploy result)
@@ -74,7 +91,7 @@ jobs:
           if [ "$DP" = "success" ]; then
             MSG="✅ todari-ops 배포 성공 (\`${GITHUB_SHA:0:7}\`)"
           elif [ "$TC" != "success" ]; then
-            MSG="🔴 todari-ops 배포 실패 — typecheck ($TC). $RUN"
+            MSG="🔴 todari-ops 배포 실패 — 검증(typecheck/test/build) ($TC). $RUN"
           else
             MSG="🔴 todari-ops 배포 실패 — deploy ($DP). $RUN"
           fi

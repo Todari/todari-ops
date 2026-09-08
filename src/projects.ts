@@ -43,7 +43,7 @@ export const projects: ProjectConfig[] = [
     aliases: ["메트로놈들", "metro-nomedeul"],
     repoUrl: "https://github.com/Todari/metro-nomedeul.git",
     defaultBranch: "main",
-    healthUrl: "https://metronomdeul.site",
+    healthUrl: "https://metronome.todari.dev",
     description: "실시간 협업 메트로놈 (Socket.IO + NestJS)",
   },
   {

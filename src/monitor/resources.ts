@@ -3,6 +3,7 @@ import { readFile, statfs } from "node:fs/promises";
 import { env } from "../env.js";
 import { fetchAlertsChannel } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
+import { runtimeHealth } from "./health.js";
 
 // 호스트 리소스 워치독. 봇은 이 EC2 위에서 도는데, 박스가 메모리 고갈로 죽으면
 // 봇도 같이 죽어 알림을 못 낸다(2026-07-27 OOM 사고). 그래서 죽기 "전에" —
@@ -134,6 +135,7 @@ async function check(): Promise<void> {
     swapAlerted = false;
     await send("✅ 스왑 정상", `스왑 사용 ${pct(swap)}로 내려감.`, 0x22c55e);
   }
+  runtimeHealth.completeCheck("resources");
 }
 
 // 봇이 부팅될 때 호스트가 방금 재부팅됐으면(자동 복구/수동) #alerts로 알린다.
@@ -159,6 +161,11 @@ export async function notifyIfRebooted(): Promise<void> {
 }
 
 export function startResourceMonitor(): void {
+  if (process.platform !== "linux") {
+    console.log("[resources] disabled (Linux /proc is required)");
+    return;
+  }
+  runtimeHealth.expectCheck("resources", env.RESOURCE_INTERVAL_MS);
   setInterval(() => void check(), env.RESOURCE_INTERVAL_MS);
   void check();
   void notifyIfRebooted();

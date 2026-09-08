@@ -9,11 +9,16 @@ import { normalizeVaultState, saveVaultState } from "../vault/state.js";
 import { updateDailyTopic } from "../digest/daily.js";
 import { jpExport } from "../jp/export.js";
 import { handleInstagramEvent, normalizeInstagramEvent } from "./instagram-handler.js";
+import { getDiscordClient } from "../discord/client.js";
+import { isDiscordConnected, runtimeHealth } from "../monitor/health.js";
 
 const MAX_BODY_BYTES = 1_000_000;
 
-export function startWebhookServer(): void {
-  if (!env.ALERTS_CHANNEL_ID) {
+export function startWebhookServer(): ReturnType<typeof createServer> {
+  if (!env.WEBHOOK_ENABLED) {
+    console.log("[webhook] inbound routes disabled; serving /healthz only");
+  }
+  if (env.WEBHOOK_ENABLED && !env.ALERTS_CHANNEL_ID) {
     console.warn("[webhook] ALERTS_CHANNEL_ID missing — inbound alerts will be dropped");
   }
   for (const [name, secret] of [
@@ -23,7 +28,7 @@ export function startWebhookServer(): void {
     ["vault-sync", env.VAULT_SYNC_SECRET],
     ["instagram", env.INSTAGRAM_WEBHOOK_SECRET],
   ] as const) {
-    if (!secret) console.warn(`[webhook] ${name} secret missing — /webhook/${name} disabled`);
+    if (env.WEBHOOK_ENABLED && !secret) console.warn(`[webhook] ${name} secret missing — /webhook/${name} disabled`);
   }
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err) => {
@@ -35,6 +40,7 @@ export function startWebhookServer(): void {
   server.listen(env.PORT, () => {
     console.log(`[webhook] listening on :${env.PORT}`);
   });
+  return server;
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -42,7 +48,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   const method = req.method ?? "GET";
 
   if (method === "GET" && url === "/healthz") {
-    writeJson(res, 200, { ok: true });
+    const health = runtimeHealth.snapshot(isDiscordConnected(getDiscordClient()));
+    writeJson(res, health.ok ? 200 : 503, health);
+    return;
+  }
+
+  if (!env.WEBHOOK_ENABLED) {
+    writeJson(res, 503, { error: "webhooks disabled" });
     return;
   }
 

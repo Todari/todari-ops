@@ -160,6 +160,7 @@ export async function handleSentryEvent(slug: string, payload: unknown): Promise
     project,
     title: issueTitle,
     alertMessage,
+    source: { kind: "sentry", release: event?.release },
     prompt: [
       "[읽기 전용 사전 진단] 코드를 수정하지 말 것. 아래 Sentry 이슈의 원인을 조사해서",
       "①원인 가설 ②근거(파일:라인) ③수정 방향을 합쳐 8줄 이내로 한국어 요약해줘.",

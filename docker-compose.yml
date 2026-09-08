@@ -38,7 +38,12 @@ services:
     ports:
       - "127.0.0.1:3100:3000"
     healthcheck:
-      test: ["CMD", "node", "-e", "process.exit(0)"]
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:' + (process.env.PORT || '3000') + '/healthz', {signal: AbortSignal.timeout(4000)}).then(async r => process.exit(r.ok && (await r.json()).ok === true ? 0 : 1)).catch(() => process.exit(1))"
+      start_period: 60s
       interval: 30s
       timeout: 5s
       retries: 3
