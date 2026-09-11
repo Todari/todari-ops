@@ -1,4 +1,5 @@
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
+import { selectSdkProfile } from "./execution-policy.js";
 import { EmbedBuilder, type Message } from "discord.js";
 import { env } from "../env.js";
 import { repoFullName, type ProjectConfig } from "../projects.js";
@@ -106,7 +107,7 @@ export async function diagnose(args: DiagnosisArgs): Promise<void> {
     const options: Options = {
       cwd: checkout.cwd,
       abortController: abort,
-      ...(env.CLAUDE_MODEL ? { model: env.CLAUDE_MODEL } : {}),
+      ...selectSdkProfile({ prompt: "", purpose: "diagnosis", model: env.CLAUDE_MODEL || undefined }),
       permissionMode: "default",
       maxTurns: 15,
       canUseTool: readOnlyCanUseTool(),

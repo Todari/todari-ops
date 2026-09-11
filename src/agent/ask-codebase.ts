@@ -3,6 +3,7 @@ import { env } from "../env.js";
 import type { ProjectConfig } from "../projects.js";
 import { ensureCheckout } from "../workspaces/checkout.js";
 import { readOnlyCanUseTool, extractText } from "./read-only.js";
+import { selectSdkProfile } from "./execution-policy.js";
 
 // #토다리에서 자연어로 코드 질문을 받으면 그 레포를 읽기 전용 에이전트로 뒤져 답한다.
 // diagnose와 같은 읽기 전용 하네스를 쓰되, 결과를 fire-and-forget이 아니라 반환한다.
@@ -16,7 +17,7 @@ export async function askCodebase(project: ProjectConfig, question: string): Pro
   const options = {
     cwd,
     abortController: abort,
-    ...(env.CLAUDE_MODEL ? { model: env.CLAUDE_MODEL } : {}),
+    ...selectSdkProfile({ prompt: question, model: env.CLAUDE_MODEL || undefined }),
     permissionMode: "default",
     maxTurns: 15,
     canUseTool: readOnlyCanUseTool(),

@@ -37,9 +37,8 @@ export const env = {
   DIGEST_CHANNEL_ID: process.env.DIGEST_CHANNEL_ID ?? "",
   DIGEST_TIME: process.env.DIGEST_TIME ?? "08:30", // KST HH:MM, empty = disabled
   DIAG_DAILY_CAP: Number(process.env.DIAG_DAILY_CAP ?? 3), // 0 = auto-diagnosis off
-  // 봇의 모든 에이전트 세션(/code·자동진단·요약)이 쓰는 모델. SDK 번들 CLI의
-  // 기본값(구세대 Sonnet)에 맡기지 않고 명시한다. 빈 값이면 번들 기본값.
-  CLAUDE_MODEL: process.env.CLAUDE_MODEL ?? "claude-opus-5",
+  // 명시한 경우 모델을 고정한다. 미설정이면 작업별 모델 정책을 적용한다.
+  CLAUDE_MODEL: process.env.CLAUDE_MODEL ?? "",
   CHECKIN_TIME: process.env.CHECKIN_TIME ?? "21:30", // KST HH:MM, empty = disabled
   GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? "",
   VAULT_REPO_URL:

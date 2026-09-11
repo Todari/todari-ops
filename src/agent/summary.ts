@@ -6,6 +6,7 @@ import { findProject } from "../projects.js";
 import { ensureCheckout } from "../workspaces/checkout.js";
 import { putPendingAction } from "../webhook/pending.js";
 import { captureException } from "../observability/sentry.js";
+import { selectSdkProfile } from "./execution-policy.js";
 
 // /end 시 세션을 resume 해 "무엇을 했고 뭘 배웠는지" 6줄 요약을 뽑고,
 // [📚 볼트 기록] 버튼으로 인박스 큐(→ TIL/트러블슈팅)로 보낼 수 있게 한다.
@@ -30,7 +31,7 @@ export async function postSessionSummary(
       cwd,
       abortController: abort,
       resume: session.sessionId,
-      ...(env.CLAUDE_MODEL ? { model: env.CLAUDE_MODEL } : {}),
+      ...selectSdkProfile({ prompt: "", purpose: "summary", model: env.CLAUDE_MODEL || undefined }),
       permissionMode: "default",
       maxTurns: 2,
       canUseTool: async () => ({ behavior: "deny", message: "summary turn: no tools" }),

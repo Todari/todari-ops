@@ -8,6 +8,7 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
 import type { VaultTaskRef } from "../vault/mutations.js";
+import type { ExecutionProfile } from "../agent/execution-policy.js";
 
 export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions";
 
@@ -15,6 +16,7 @@ export interface Session {
   threadId: string;
   projectSlug: string;
   sessionId?: string;
+  executionProfile?: ExecutionProfile;
   permissionMode: PermissionMode;
   sourceTask?: VaultTaskRef;
   createdAt: number;
@@ -78,6 +80,14 @@ export async function updateSessionId(threadId: string, sessionId: string): Prom
   const s = sessions.get(threadId);
   if (s) {
     s.sessionId = sessionId;
+    await persist();
+  }
+}
+
+export async function updateExecutionProfile(threadId: string, profile: ExecutionProfile): Promise<void> {
+  const session = sessions.get(threadId);
+  if (session) {
+    session.executionProfile = profile;
     await persist();
   }
 }

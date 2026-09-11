@@ -7,6 +7,7 @@ import { env } from "../env.js";
 import {
   getSession,
   updateSessionId,
+  updateExecutionProfile,
   type PermissionMode,
 } from "../storage/sessions.js";
 import { findProject } from "../projects.js";
@@ -16,10 +17,11 @@ import { renderEvent } from "./render.js";
 import { logAudit } from "../storage/audit.js";
 import { getDiscordClient } from "../discord/client.js";
 import { captureException } from "../observability/sentry.js";
+import { selectExecutionProfile, sdkProfileOptions, type Effort, type ExecutionProfile } from "./execution-policy.js";
 
 interface ActiveTurn {
   abort: AbortController;
-  pendingPrompt: string | null;
+  pendingPrompt: StartTurnArgs | null;
 }
 
 const activeTurns = new Map<string, ActiveTurn>();
@@ -40,6 +42,8 @@ export interface StartTurnArgs {
   threadId: string;
   prompt: string;
   isFirstTurn: boolean;
+  model?: string;
+  effort?: Effort;
 }
 
 export async function startTurn(args: StartTurnArgs): Promise<void> {
@@ -60,7 +64,7 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
         "⏳ 큐에 이미 한 개 대기 중 — 이번 메시지는 무시됨. (1-슬롯 큐)",
       );
     } else {
-      existing.pendingPrompt = args.prompt;
+      existing.pendingPrompt = args;
       await thread.send("📥 큐에 추가됨 — 현재 턴 끝나면 자동 실행");
     }
     return;
@@ -129,6 +133,12 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
       return;
     }
 
+    const profile = selectExecutionProfile({
+      prompt: args.prompt, previous: session.executionProfile,
+      model: args.model, defaultModel: env.CLAUDE_MODEL || undefined, effort: args.effort,
+    });
+    await updateExecutionProfile(args.threadId, profile);
+    await logAudit({ threadId: args.threadId, tool: "turn:profile", input: profile, decision: "selected" });
     const sdkOptions = buildOptions({
       cwd,
       abort,
@@ -136,13 +146,19 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
       mode: session.permissionMode,
       threadId: args.threadId,
       thread,
+      profile,
     });
 
     let newSessionId: string | undefined;
+    let result: { subtype: string; is_error: boolean; usage: unknown; total_cost_usd: number } | undefined;
     for await (const message of query({ prompt: args.prompt, options: sdkOptions })) {
       await renderEvent(thread, message);
       const maybeId = (message as { session_id?: string }).session_id;
       if (maybeId) newSessionId = maybeId;
+      if (message.type === "result") {
+        result = { subtype: message.subtype, is_error: message.is_error,
+          usage: message.usage, total_cost_usd: message.total_cost_usd };
+      }
     }
     if (newSessionId && newSessionId !== session.sessionId) {
       await updateSessionId(args.threadId, newSessionId);
@@ -150,8 +166,8 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
     await logAudit({
       threadId: args.threadId,
       tool: "turn:complete",
-      input: { prompt: args.prompt },
-      decision: "ok",
+      input: { profile, result },
+      decision: result ? result.is_error ? "failed" : "ok" : "unknown",
     });
   } catch (err) {
     if (abort.signal.aborted) {
@@ -169,8 +185,7 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
     const queued = finished?.pendingPrompt;
     if (queued && !abort.signal.aborted) {
       void startTurn({
-        threadId: args.threadId,
-        prompt: queued,
+        ...queued,
         isFirstTurn: false,
       });
     }
@@ -190,6 +205,7 @@ export async function cancelActiveTurn(threadId: string): Promise<boolean> {
 }
 
 interface BuildOptionsArgs {
+  profile: ExecutionProfile;
   cwd: string;
   abort: AbortController;
   resume: string | undefined;
@@ -204,7 +220,7 @@ function buildOptions(args: BuildOptionsArgs): Options {
     cwd: args.cwd,
     abortController: args.abort,
     resume: args.resume,
-    ...(env.CLAUDE_MODEL ? { model: env.CLAUDE_MODEL } : {}),
+    ...sdkProfileOptions(args.profile),
     permissionMode: args.mode,
     canUseTool: async (toolName, toolInput) => {
       const decision = await askPermission({

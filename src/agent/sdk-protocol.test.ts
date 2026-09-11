@@ -163,7 +163,7 @@ describe("installed Agent SDK offline protocol", () => {
       expect(options.args).toContain("--setting-sources=");
       expect(options.args).toContain("--no-session-persistence");
       expect(options.args).toContain("--include-partial-messages");
-      expect(options.args[options.args.indexOf("--resume") + 1]).toBe(resume);
+      expect(options.args).toContain(`--resume=${resume}`);
       expect(options.args[options.args.indexOf("--permission-prompt-tool") + 1]).toBe("stdio");
       // Compare names only so a failed isolation assertion cannot print secrets.
       expect(Object.keys(options.env).filter((name) => /TOKEN|API_KEY|HOME|CLAUDE_CONFIG_DIR/.test(name))).toEqual([]);
