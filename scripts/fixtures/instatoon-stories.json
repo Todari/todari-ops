@@ -1,0 +1,649 @@
+[
+  {
+    "id": "office",
+    "topic": "직장 오해",
+    "body": "회의 자료가 사라졌다. 팀장님께 말씀드렸다. 동료가 휴지통을 확인했다. 파일이 휴지통에 있었다. 복원하고 회의를 마쳤다.",
+    "plan": {
+      "caption": "직장 오해",
+      "story": {
+        "characters": [
+          {
+            "id": "me",
+            "design": "Young adult with cropped black hair, round glasses, navy cardigan"
+          },
+          {
+            "id": "boss",
+            "design": "Older adult with silver bob, oval face, cream jacket"
+          },
+          {
+            "id": "coworker",
+            "design": "Adult with curly brown hair, green shirt and black trousers"
+          }
+        ],
+        "locations": [
+          {
+            "id": "place",
+            "design": "Office with oak desks, grey chairs and a white meeting table"
+          }
+        ],
+        "facts": [
+          "회의 자료가 사라졌다.",
+          "팀장님께 말씀드렸다.",
+          "동료가 휴지통을 확인했다.",
+          "파일이 휴지통에 있었다.",
+          "복원하고 회의를 마쳤다."
+        ]
+      },
+      "panels": [
+        {
+          "text": "회의 자료가 사라졌다.",
+          "visual": "Scene 1: Office with oak desks, grey chairs and a white meeting table. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me",
+            "boss",
+            "coworker"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "회의 자료가 사라졌다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "팀장님께 말씀드렸다.",
+          "visual": "Scene 2: Office with oak desks, grey chairs and a white meeting table. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me",
+            "boss",
+            "coworker"
+          ],
+          "location": "place",
+          "source_facts": [
+            1
+          ],
+          "beat": "팀장님께 말씀드렸다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "동료가 휴지통을 확인했다.",
+          "visual": "Scene 3: Office with oak desks, grey chairs and a white meeting table. Depict only the supplied source event with the listed cast.",
+          "framing": "close-up",
+          "characters": [
+            "me",
+            "boss",
+            "coworker"
+          ],
+          "location": "place",
+          "source_facts": [
+            2
+          ],
+          "beat": "동료가 휴지통을 확인했다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "파일이 휴지통에 있었다.",
+          "visual": "Scene 4: Office with oak desks, grey chairs and a white meeting table. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me",
+            "boss",
+            "coworker"
+          ],
+          "location": "place",
+          "source_facts": [
+            3
+          ],
+          "beat": "파일이 휴지통에 있었다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "복원하고 회의를 마쳤다.",
+          "visual": "Scene 5: Office with oak desks, grey chairs and a white meeting table. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me",
+            "boss",
+            "coworker"
+          ],
+          "location": "place",
+          "source_facts": [
+            4
+          ],
+          "beat": "복원하고 회의를 마쳤다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        }
+      ]
+    }
+  },
+  {
+    "id": "family",
+    "topic": "할머니와 손녀",
+    "body": "할머니가 새 휴대폰을 사셨다. 손녀가 영상통화를 알려드렸다. 할머니가 카메라를 손으로 가리셨다. 손녀가 손을 내려드렸다. 화면에 서로 얼굴이 보여 웃었다.",
+    "plan": {
+      "caption": "할머니와 손녀",
+      "story": {
+        "characters": [
+          {
+            "id": "grandma",
+            "design": "Elderly woman with curly silver hair, round face, lavender cardigan"
+          },
+          {
+            "id": "child",
+            "design": "Small girl with two black braids, yellow sweatshirt, blue trousers"
+          }
+        ],
+        "locations": [
+          {
+            "id": "place",
+            "design": "Warm living room with a green sofa and a brown wooden table"
+          }
+        ],
+        "facts": [
+          "할머니가 새 휴대폰을 사셨다.",
+          "손녀가 영상통화를 알려드렸다.",
+          "할머니가 카메라를 손으로 가리셨다.",
+          "손녀가 손을 내려드렸다.",
+          "화면에 서로 얼굴이 보여 웃었다."
+        ]
+      },
+      "panels": [
+        {
+          "text": "할머니가 새 휴대폰을 사셨다.",
+          "visual": "Scene 1: Warm living room with a green sofa and a brown wooden table. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "grandma",
+            "child"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "할머니가 새 휴대폰을 사셨다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "손녀가 영상통화를 알려드렸다.",
+          "visual": "Scene 2: Warm living room with a green sofa and a brown wooden table. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "grandma",
+            "child"
+          ],
+          "location": "place",
+          "source_facts": [
+            1
+          ],
+          "beat": "손녀가 영상통화를 알려드렸다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "할머니가 카메라를 손으로 가리셨다.",
+          "visual": "Scene 3: Warm living room with a green sofa and a brown wooden table. Depict only the supplied source event with the listed cast.",
+          "framing": "close-up",
+          "characters": [
+            "grandma",
+            "child"
+          ],
+          "location": "place",
+          "source_facts": [
+            2
+          ],
+          "beat": "할머니가 카메라를 손으로 가리셨다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "손녀가 손을 내려드렸다.",
+          "visual": "Scene 4: Warm living room with a green sofa and a brown wooden table. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "grandma",
+            "child"
+          ],
+          "location": "place",
+          "source_facts": [
+            3
+          ],
+          "beat": "손녀가 손을 내려드렸다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "화면에 서로 얼굴이 보여 웃었다.",
+          "visual": "Scene 5: Warm living room with a green sofa and a brown wooden table. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "grandma",
+            "child"
+          ],
+          "location": "place",
+          "source_facts": [
+            4
+          ],
+          "beat": "화면에 서로 얼굴이 보여 웃었다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pet",
+    "topic": "고양이의 숨바꼭질",
+    "body": "고양이가 보이지 않았다. 방 안을 둘러봤다. 책상 아래에서 소리가 났다. 상자 안에 고양이가 있었다. 고양이는 다시 잠들었다.",
+    "plan": {
+      "caption": "고양이의 숨바꼭질",
+      "story": {
+        "characters": [
+          {
+            "id": "owner",
+            "design": "Adult with short brown hair, cream pullover and green trousers"
+          },
+          {
+            "id": "cat",
+            "design": "Small orange tabby cat, white chest, white front paws, striped tail"
+          }
+        ],
+        "locations": [
+          {
+            "id": "place",
+            "design": "Bedroom with a low desk, blue rug and one open cardboard box"
+          }
+        ],
+        "facts": [
+          "고양이가 보이지 않았다.",
+          "방 안을 둘러봤다.",
+          "책상 아래에서 소리가 났다.",
+          "상자 안에 고양이가 있었다.",
+          "고양이는 다시 잠들었다."
+        ]
+      },
+      "panels": [
+        {
+          "text": "고양이가 보이지 않았다.",
+          "visual": "Scene 1: Bedroom with a low desk, blue rug and one open cardboard box. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "owner",
+            "cat"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "고양이가 보이지 않았다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "방 안을 둘러봤다.",
+          "visual": "Scene 2: Bedroom with a low desk, blue rug and one open cardboard box. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "owner",
+            "cat"
+          ],
+          "location": "place",
+          "source_facts": [
+            1
+          ],
+          "beat": "방 안을 둘러봤다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "책상 아래에서 소리가 났다.",
+          "visual": "Scene 3: Bedroom with a low desk, blue rug and one open cardboard box. Depict only the supplied source event with the listed cast.",
+          "framing": "close-up",
+          "characters": [
+            "owner",
+            "cat"
+          ],
+          "location": "place",
+          "source_facts": [
+            2
+          ],
+          "beat": "책상 아래에서 소리가 났다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "상자 안에 고양이가 있었다.",
+          "visual": "Scene 4: Bedroom with a low desk, blue rug and one open cardboard box. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "owner",
+            "cat"
+          ],
+          "location": "place",
+          "source_facts": [
+            3
+          ],
+          "beat": "상자 안에 고양이가 있었다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "고양이는 다시 잠들었다.",
+          "visual": "Scene 5: Bedroom with a low desk, blue rug and one open cardboard box. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "owner",
+            "cat"
+          ],
+          "location": "place",
+          "source_facts": [
+            4
+          ],
+          "beat": "고양이는 다시 잠들었다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        }
+      ]
+    }
+  },
+  {
+    "id": "short",
+    "topic": "아주 짧은 제보",
+    "body": "버스를 놓쳤다. 다음 버스를 탔다.",
+    "plan": {
+      "caption": "아주 짧은 제보",
+      "story": {
+        "characters": [
+          {
+            "id": "me",
+            "design": "Adult with long black ponytail, blue coat, round red backpack"
+          }
+        ],
+        "locations": [
+          {
+            "id": "place",
+            "design": "Bus stop with a plain glass shelter and a yellow curb"
+          }
+        ],
+        "facts": [
+          "버스를 놓쳤다. 다음 버스를 탔다."
+        ]
+      },
+      "panels": [
+        {
+          "text": "버스를 놓쳤다.",
+          "visual": "Scene 1: Bus stop with a plain glass shelter and a yellow curb. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "버스를 놓쳤다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "떠나는 버스.",
+          "visual": "Scene 2: Bus stop with a plain glass shelter and a yellow curb. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "떠나는 버스.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "다음 버스를 기다렸다.",
+          "visual": "Scene 3: Bus stop with a plain glass shelter and a yellow curb. Depict only the supplied source event with the listed cast.",
+          "framing": "close-up",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "다음 버스를 기다렸다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "다음 버스가 왔다.",
+          "visual": "Scene 4: Bus stop with a plain glass shelter and a yellow curb. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "다음 버스가 왔다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "그 버스를 탔다.",
+          "visual": "Scene 5: Bus stop with a plain glass shelter and a yellow curb. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "그 버스를 탔다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        }
+      ]
+    }
+  },
+  {
+    "id": "open",
+    "topic": "답을 모르는 이야기",
+    "body": "친구에게 편지를 보냈다. 우체통에 넣었다. 며칠이 지났다. 아직 답장이 없다. 왜 답이 없는지는 모른다.",
+    "plan": {
+      "caption": "답을 모르는 이야기",
+      "story": {
+        "characters": [
+          {
+            "id": "me",
+            "design": "Adult with straight black bob, green coat, cream shoulder bag"
+          }
+        ],
+        "locations": [
+          {
+            "id": "place",
+            "design": "Quiet neighborhood with a red mailbox beside a cream apartment building"
+          }
+        ],
+        "facts": [
+          "친구에게 편지를 보냈다.",
+          "우체통에 넣었다.",
+          "며칠이 지났다.",
+          "아직 답장이 없다.",
+          "왜 답이 없는지는 모른다."
+        ]
+      },
+      "panels": [
+        {
+          "text": "친구에게 편지를 보냈다.",
+          "visual": "Scene 1: Quiet neighborhood with a red mailbox beside a cream apartment building. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "친구에게 편지를 보냈다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "우체통에 넣었다.",
+          "visual": "Scene 2: Quiet neighborhood with a red mailbox beside a cream apartment building. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            1
+          ],
+          "beat": "우체통에 넣었다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "며칠이 지났다.",
+          "visual": "Scene 3: Quiet neighborhood with a red mailbox beside a cream apartment building. Depict only the supplied source event with the listed cast.",
+          "framing": "close-up",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            2
+          ],
+          "beat": "며칠이 지났다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "아직 답장이 없다.",
+          "visual": "Scene 4: Quiet neighborhood with a red mailbox beside a cream apartment building. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            3
+          ],
+          "beat": "아직 답장이 없다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        },
+        {
+          "text": "왜 답이 없는지는 모른다.",
+          "visual": "Scene 5: Quiet neighborhood with a red mailbox beside a cream apartment building. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me"
+          ],
+          "location": "place",
+          "source_facts": [
+            4
+          ],
+          "beat": "왜 답이 없는지는 모른다.",
+          "continuity": "Same character designs and setting; maintain positions and object ownership"
+        }
+      ]
+    }
+  },
+  {
+    "id": "time_change",
+    "topic": "소품과 시간 변화",
+    "body": "아침에 동생에게 빨간 우산을 빌려줬다. 동생은 학교에 갔다. 저녁에 비가 내렸다. 동생이 빨간 우산을 들고 돌아왔다. 현관에서 우산을 돌려받았다.",
+    "plan": {
+      "caption": "소품과 시간 변화",
+      "story": {
+        "characters": [
+          {
+            "id": "me",
+            "design": "Adult with cropped black hair, navy pullover and beige trousers"
+          },
+          {
+            "id": "sibling",
+            "design": "Teenager with brown bowl cut, green school jacket and blue backpack"
+          }
+        ],
+        "locations": [
+          {
+            "id": "place",
+            "design": "Home entryway with a grey shoe cabinet and a blue door"
+          }
+        ],
+        "facts": [
+          "아침에 동생에게 빨간 우산을 빌려줬다.",
+          "동생은 학교에 갔다.",
+          "저녁에 비가 내렸다.",
+          "동생이 빨간 우산을 들고 돌아왔다.",
+          "현관에서 우산을 돌려받았다."
+        ]
+      },
+      "panels": [
+        {
+          "text": "아침에 동생에게 빨간 우산을 빌려줬다.",
+          "visual": "Scene 1: Home entryway with a grey shoe cabinet and a blue door. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me",
+            "sibling"
+          ],
+          "location": "place",
+          "source_facts": [
+            0
+          ],
+          "beat": "아침에 동생에게 빨간 우산을 빌려줬다.",
+          "continuity": "Morning; older sibling hands the red umbrella to younger sibling"
+        },
+        {
+          "text": "동생은 학교에 갔다.",
+          "visual": "Scene 2: Home entryway with a grey shoe cabinet and a blue door. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me",
+            "sibling"
+          ],
+          "location": "place",
+          "source_facts": [
+            1
+          ],
+          "beat": "동생은 학교에 갔다.",
+          "continuity": "Keep the stated timeline and red umbrella owner"
+        },
+        {
+          "text": "저녁에 비가 내렸다.",
+          "visual": "Scene 3: Home entryway with a grey shoe cabinet and a blue door. Depict only the supplied source event with the listed cast.",
+          "framing": "close-up",
+          "characters": [
+            "me",
+            "sibling"
+          ],
+          "location": "place",
+          "source_facts": [
+            2
+          ],
+          "beat": "저녁에 비가 내렸다.",
+          "continuity": "Keep the stated timeline and red umbrella owner"
+        },
+        {
+          "text": "동생이 빨간 우산을 들고 돌아왔다.",
+          "visual": "Scene 4: Home entryway with a grey shoe cabinet and a blue door. Depict only the supplied source event with the listed cast.",
+          "framing": "medium",
+          "characters": [
+            "me",
+            "sibling"
+          ],
+          "location": "place",
+          "source_facts": [
+            3
+          ],
+          "beat": "동생이 빨간 우산을 들고 돌아왔다.",
+          "continuity": "Evening rain; younger sibling holds the same red umbrella"
+        },
+        {
+          "text": "현관에서 우산을 돌려받았다.",
+          "visual": "Scene 5: Home entryway with a grey shoe cabinet and a blue door. Depict only the supplied source event with the listed cast.",
+          "framing": "wide",
+          "characters": [
+            "me",
+            "sibling"
+          ],
+          "location": "place",
+          "source_facts": [
+            4
+          ],
+          "beat": "현관에서 우산을 돌려받았다.",
+          "continuity": "Evening rain; younger sibling holds the same red umbrella"
+        }
+      ]
+    }
+  }
+]

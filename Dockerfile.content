@@ -1,0 +1,31 @@
+# Opt-in EC2 bot runtime with Korean fonts, ffmpeg and Linux Chromium.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+RUN corepack enable && apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY scripts/check_sdk_cli.mjs ./scripts/check_sdk_cli.mjs
+RUN pnpm install --frozen-lockfile && pnpm test:sdk
+COPY tsconfig.json ./
+COPY src ./src
+RUN NODE_OPTIONS=--max-old-space-size=768 pnpm build
+
+FROM node:22-bookworm-slim
+WORKDIR /app
+RUN corepack enable && apt-get update && apt-get install -y --no-install-recommends \
+    git openssh-client bash ca-certificates python3 python3-venv ffmpeg chromium fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/content-requirements.txt /tmp/content-requirements.txt
+RUN python3 -m venv /opt/content-venv && /opt/content-venv/bin/pip install --no-cache-dir -r /tmp/content-requirements.txt
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY package.json ./
+COPY scripts/content_pipeline.py ./scripts/content_pipeline.py
+COPY scripts/content_revision.py ./scripts/content_revision.py
+COPY deploy/content_preflight.py ./deploy/content_preflight.py
+COPY deploy/instatoon_preflight.py ./deploy/instatoon_preflight.py
+RUN mkdir -p /data/work /home/node/.claude && chown -R node:node /data /home/node/.claude
+ENV CONTENT_PYTHON=/opt/content-venv/bin/python3
+ENV REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium
+USER node
+EXPOSE 3000
+CMD ["node", "dist/bot.js"]

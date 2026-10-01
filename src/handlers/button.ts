@@ -1,3 +1,4 @@
+import { contentButton } from "../content/index.js";
 import { ChannelType, MessageFlags, type ButtonInteraction } from "discord.js";
 import { env } from "../env.js";
 import { resolvePending, type PermissionDecision } from "../agent/permissions.js";
@@ -15,6 +16,11 @@ export async function handleButton(interaction: ButtonInteraction): Promise<void
     return;
   }
   const [kind, action, id] = interaction.customId.split(":");
+
+  if (kind === "content") {
+    await contentButton(interaction);
+    return;
+  }
 
   if (kind === "perm") {
     const decision = action as PermissionDecision;

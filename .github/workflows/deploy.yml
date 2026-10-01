@@ -33,6 +33,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: pip install -r deploy/content-requirements.txt
       - run: pnpm test:python
       - run: pnpm build
 
@@ -64,7 +65,7 @@ jobs:
           rsync -avz --delete \
             --exclude='node_modules' \
             --exclude='.env' \
-            --exclude='.env.production' \
+            --exclude='.env.*' \
             --exclude='.git' \
             --exclude='.github' \
             --exclude='data' \
@@ -74,7 +75,7 @@ jobs:
       - name: Build and restart containers
         run: |
           ssh -i ~/.ssh/id_deploy "$EC2_HOST" \
-            'cd ~/todari-ops && docker compose --env-file .env.production up -d --build --wait --wait-timeout 180'
+            'cd ~/todari-ops && bash deploy/compose.sh deploy'
 
   notify:
     needs: [typecheck, deploy]

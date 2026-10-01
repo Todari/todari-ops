@@ -1,0 +1,21 @@
+# Selected by deploy/compose.sh from persisted .env.production / .env.content configuration.
+services:
+  bot:
+    build:
+      dockerfile: Dockerfile.content
+    env_file:
+      - .env.content
+    environment:
+      CONTENT_ENABLED: "true"
+      WAENYAMYEON_ROOT: /data/content-repos/waenyamyeon
+      INSTATOON_ROOT: /data/content-repos/instatoon-studio
+    volumes:
+      # A Linux checkout with Linux npm ci dependencies. Never mount macOS node_modules.
+      - type: bind
+        source: ${CONTENT_REPOS_DIR:-/home/ubuntu/content-repos}
+        target: /data/content-repos
+        bind:
+          create_host_path: false
+    shm_size: 1gb
+    cpus: 1.0
+    mem_limit: 1800m

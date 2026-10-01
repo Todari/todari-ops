@@ -11,3 +11,5 @@ audit.log
 *.tsbuildinfo
 data/
 deploy/secrets/
+.env.content
+__pycache__/

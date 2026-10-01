@@ -1,3 +1,4 @@
+import { contentCommand } from "../content/index.js";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -40,6 +41,9 @@ export async function handleSlash(interaction: ChatInputCommandInteraction): Pro
   }
 
   switch (interaction.commandName) {
+    case "content":
+      await contentCommand(interaction);
+      return;
     case "ping":
       await interaction.reply({ content: "pong 🏓", flags: MessageFlags.Ephemeral });
       return;

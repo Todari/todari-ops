@@ -1,3 +1,4 @@
+import { startContentWorker, contentChannelMessage, contentThreadMessage } from "./content/index.js";
 import { captureException } from "./observability/sentry.js";
 import { Events } from "discord.js";
 import { env, assertEnv } from "./env.js";
@@ -46,6 +47,7 @@ client.once(Events.ClientReady, async (c) => {
   startReminders();
   startEveningCheckin();
   scheduleJpPush(c);
+  startContentWorker(c);
   runtimeHealth.markInitialized();
 });
 
@@ -73,6 +75,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   if (message.author.id !== env.OWNER_DISCORD_ID) return;
+  try {
+    if (await contentChannelMessage(message)) return;
+  } catch (err) {
+    console.error("[content] message intake failed");
+    captureException(err, { kind: "content-message", channelId: message.channelId });
+    return;
+  }
   // 전용 자연어 채널: 명령어 없이 그냥 말하면 의도 분류→라우팅.
   if (env.NL_CHANNEL_ID && message.channelId === env.NL_CHANNEL_ID) {
     try {
@@ -86,6 +95,8 @@ client.on(Events.MessageCreate, async (message) => {
   // /code 세션 스레드: 에이전트 대화 이어가기.
   if (!message.channel.isThread()) return;
   try {
+    // 콘텐츠 초안/검토 스레드: 컷 단위 수정 요청.
+    if (await contentThreadMessage(message)) return;
     await handleThreadMessage(message);
   } catch (err) {
     console.error("[message] error:", err);

@@ -21,17 +21,17 @@ rsync -avz --delete \
   --exclude=dist \
   --exclude=.git \
   --exclude=.env \
-  --exclude=.env.production \
+  --exclude='.env.*' \
   --exclude=data \
   --exclude=audit.log \
   -e "$RSYNC_SSH" \
   ./ "$EC2_HOST:$EC2_PATH/"
 
 echo "==> Building & restarting container on remote"
-ssh "${SSH_OPTS[@]}" "$EC2_HOST" "cd $EC2_PATH && docker compose --env-file .env.production pull --quiet 2>/dev/null || true && docker compose --env-file .env.production up -d --build"
+ssh "${SSH_OPTS[@]}" "$EC2_HOST" "cd $EC2_PATH && bash deploy/compose.sh deploy"
 
 echo "==> Tailing recent logs (last 50 lines, then Ctrl+C)"
-ssh "${SSH_OPTS[@]}" "$EC2_HOST" "cd $EC2_PATH && docker compose logs --tail=50 bot"
+ssh "${SSH_OPTS[@]}" "$EC2_HOST" "cd $EC2_PATH && bash deploy/compose.sh logs --tail=50 bot"
 
 echo
-echo "Done. To follow logs live: ssh $EC2_HOST 'cd $EC2_PATH && docker compose logs -f bot'"
+echo "Done. To follow logs live: ssh $EC2_HOST 'cd $EC2_PATH && bash deploy/compose.sh logs -f bot'"

@@ -3,6 +3,12 @@ import { env } from "../env.js";
 import { projects } from "../projects.js";
 
 export const commands = [
+  new SlashCommandBuilder().setName("content").setDescription("왜냐면·인스타툰 제작 요청 또는 작업 상태 확인")
+    .addStringOption(o => o.setName("kind").setDescription("콘텐츠 종류").addChoices(
+      { name: "왜냐면 릴스", value: "waenyamyeon" }, { name: "인스타툰", value: "instatoon" }))
+    .addStringOption(o => o.setName("topic").setDescription("주제").setMaxLength(100))
+    .addStringOption(o => o.setName("body").setDescription("전달할 내용·실제 썰·원하는 방향").setMaxLength(4000))
+    .addStringOption(o => o.setName("job").setDescription("기존 작업 ID (상태 확인 시 다른 항목 생략)")),
   new SlashCommandBuilder()
     .setName("code")
     .setDescription("Start a Claude Code session against a project")
