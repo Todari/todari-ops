@@ -189,6 +189,38 @@ class InstagramWatchdogTest(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertTrue(any("**09._.ham**" in line for line in lines))
 
+    def test_daily_publish_digest_reports_yesterday_once_after_nine(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            jobs = [
+                ("gonggu:daily:2026-10-07", "gonggu", "gonggu-daily", datetime(2026, 10, 7, 9, tzinfo=KST), True),
+                ("jakkuyagu:flow-reel:a", "jakkuyagu", "game-flow-reel", datetime(2026, 10, 7, 23, tzinfo=KST), False),
+                ("jakkuyagu:flow-reel:b", "jakkuyagu", "game-flow-reel", datetime(2026, 10, 7, 23, tzinfo=KST), False),
+                ("jakkuyagu:flow-reel:c", "jakkuyagu", "game-flow-reel", datetime(2026, 10, 3, 23, tzinfo=KST), True),
+            ]
+            for job_id, account, content_type, expected, published in jobs:
+                ledger.sync(
+                    job_id=job_id, account=account, content_type=content_type, source_key=job_id,
+                    expected_at=expected, due_at=expected + timedelta(hours=1), published=published,
+                    now=expected + timedelta(hours=2),
+                )
+            state: dict = {}
+            with patch.object(watchdog, "_notify_digest", return_value=True) as notify:
+                watchdog.daily_publish_digest_once(state, datetime(2026, 10, 8, 8, 59, tzinfo=KST), ledger)
+                notify.assert_not_called()
+                watchdog.daily_publish_digest_once(state, datetime(2026, 10, 8, 9, 7, tzinfo=KST), ledger)
+                watchdog.daily_publish_digest_once(state, datetime(2026, 10, 8, 9, 22, tzinfo=KST), ledger)
+            ledger.close()
+
+        notify.assert_called_once_with(
+            "인스타 게시 실적 · 2026-10-07",
+            "어제 게시: 1/3건\n"
+            "· gonggu gonggu-daily 1/1\n"
+            "· jakkuyagu game-flow-reel 0/2 ← 미게시 있음\n"
+            "최근 7일: gonggu 1/1 · jakkuyagu 1/3",
+        )
+        self.assertEqual(state["_instagram_daily_publish_digest"], "2026-10-08")
+
     def test_weekly_digest_starts_with_reliability_summary(self):
         lines = watchdog.build_weekly_digest_lines(
             {"latest": {"accounts": {}}, "history": [], "performance_feedback": {}},

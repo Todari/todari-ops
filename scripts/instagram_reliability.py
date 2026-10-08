@@ -334,6 +334,26 @@ class ReliabilityLedger:
         self.connection.commit()
         return bool(cursor.rowcount)
 
+    def publish_counts(self, first_day: str, last_day: str) -> list[tuple[str, str, int, int]]:
+        """expected_at 날짜가 first_day~last_day인 작업의 계정·유형별 (게시, 전체). 취소는 뺀다.
+
+        ponytail: 저장된 문자열의 날짜 부분으로 묶는다. 계정마다 KST·UTC 표기가 섞여 있어
+        하루 경계가 최대 9시간 어긋날 수 있다. 정확한 경계가 필요해지면 기대 시각을 KST로 통일한다.
+        """
+        return [
+            (account, content_type, int(published or 0), int(total))
+            for account, content_type, published, total in self.connection.execute(
+                """
+                SELECT account, content_type, SUM(status='published'), COUNT(*)
+                FROM jobs
+                WHERE substr(expected_at, 1, 10) BETWEEN ? AND ? AND status != 'cancelled'
+                GROUP BY account, content_type
+                ORDER BY account, content_type
+                """,
+                (first_day, last_day),
+            )
+        ]
+
     def weekly_alert_summary(self, since: datetime, until: datetime) -> dict[str, int]:
         """주간 알림 수와 실제 미게시·정책 취소 job 수를 집계한다."""
         start, end = _timestamp(since), _timestamp(until)

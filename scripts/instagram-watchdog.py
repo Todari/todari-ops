@@ -976,6 +976,46 @@ def weekly_digest_once(
         print(f"주간 다이제스트 발송: {week_key}")
 
 
+def build_daily_publish_lines(
+    yesterday: list[tuple[str, str, int, int]], week: list[tuple[str, str, int, int]]
+) -> list[str]:
+    """어제와 최근 7일의 게시/예정 건수 요약 줄을 만든다(순수 함수)."""
+    lines = [
+        f"어제 게시: {sum(row[2] for row in yesterday)}/{sum(row[3] for row in yesterday)}건"
+    ]
+    lines.extend(
+        f"· {account} {content_type} {published}/{total}" + ("" if published == total else " ← 미게시 있음")
+        for account, content_type, published, total in yesterday
+    )
+    totals: dict[str, list[int]] = {}
+    for account, _, published, total in week:
+        pair = totals.setdefault(account, [0, 0])
+        pair[0] += published
+        pair[1] += total
+    lines.append(
+        "최근 7일: " + " · ".join(f"{account} {done}/{total}" for account, (done, total) in totals.items())
+    )
+    return lines
+
+
+def daily_publish_digest_once(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
+    """매일 9시 이후 한 번, 어제 예정 대비 게시 건수를 디스코드로 보낸다.
+
+    건별 지연 알림만으로는 며칠째 거의 게시되지 않는 상태가 한눈에 보이지 않는다.
+    """
+    today = now.date()
+    if now.hour < 9 or state.get("_instagram_daily_publish_digest") == today.isoformat():
+        return
+    yesterday = (today - timedelta(days=1)).isoformat()
+    week = ledger.publish_counts((today - timedelta(days=7)).isoformat(), yesterday)
+    if not week:
+        return
+    lines = build_daily_publish_lines(ledger.publish_counts(yesterday, yesterday), week)
+    if _notify_digest(f"인스타 게시 실적 · {yesterday}", "\n".join(lines)):
+        state["_instagram_daily_publish_digest"] = today.isoformat()
+        print(f"일일 게시 실적 발송: {yesterday}")
+
+
 def build_weekly_digest_lines(
     data: dict,
     now: datetime,
@@ -1125,6 +1165,10 @@ def main(argv: list[str] | None = None) -> None:
         weekly_digest_once(state, now, ledger)
     except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
         print(f"warning: 주간 다이제스트 실패 — {type(error).__name__}: {error}")
+    try:
+        daily_publish_digest_once(state, now, ledger)
+    except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
+        print(f"warning: 일일 게시 실적 실패 — {type(error).__name__}: {error}")
     _save_state(state)
     ledger.close()
 
