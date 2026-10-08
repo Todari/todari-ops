@@ -752,12 +752,14 @@ def check_gonggu(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
         )
         state.pop(job_id, None)
         return
-    if publication_state == "failed" or item["status"] in {
+    # 발행 결과 확인 필요는 공구함이 재발행을 멈춘 상태라 마감을 기다리지 않고 사유와 함께 알린다.
+    reported = publication_state in {"failed", "publication_confirmation_required"}
+    if reported or item["status"] in {
         "missing",
         "recovering",
         "operator_required",
     }:
-        detail = status.get("detail") if publication_state == "failed" else None
+        detail = status.get("detail") if reported else None
         message = detail or f"{today_text} 공구 일일 다이제스트가 마감 시각까지 게시되지 않았습니다."
         _alert_once(
             state,
@@ -767,7 +769,7 @@ def check_gonggu(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
             "gonggu-daily",
             str(message),
             now=now,
-            force_initial=publication_state == "failed",
+            force_initial=reported,
         )
 
 

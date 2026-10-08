@@ -33,7 +33,7 @@
 
 ## EC2 설정
 
-기본 런타임은 Alpine이며 콘텐츠 기능은 opt-in이다. 로컬의 `deploy/compose.sh`와 GitHub Actions 수정안은 EC2 `.env.content`의 `CONTENT_ENABLED=true`를 읽어 `Dockerfile.content`와 compose overlay를 선택한다. 이 수정안은 아직 원격 main에 커밋·푸시하지 않았다. **현재 운영은 격리 릴리스 직접 배포이며, 다음 main 자동 배포가 기본 봇으로 되돌리지 않도록 위 배포 기록의 경계를 먼저 확인한다.** 미설정·false·0이면 기본 런타임, true·1이면 콘텐츠 런타임이며 오타는 배포를 중단한다. 단일 bot replica를 유지한다.
+기본 런타임은 Alpine이며 콘텐츠 기능은 opt-in이다. `deploy/compose.sh`와 GitHub Actions 배포는 EC2 `.env.content`의 `CONTENT_ENABLED=true`를 읽어 `Dockerfile.content`와 compose overlay를 선택한다. 2026-10-01 커밋 `4431f00`부터 이 경로가 main 자동 배포에 포함됐다(`.github/workflows/deploy.yml`이 EC2에서 `bash deploy/compose.sh deploy`를 실행). 그 전의 격리 릴리스 직접 배포 기록은 [배포 증빙](todatoon-deploy-2026-09-14.md)에 남아 있다. 미설정·false·0이면 기본 런타임, true·1이면 콘텐츠 런타임이며 오타는 배포를 중단한다. 단일 bot replica를 유지한다.
 
 1. EC2의 전용 경로에 `waenyamyeon`, `instatoon-studio`를 배치한다. `.env`, macOS `node_modules`, 캐시를 복사하지 않는다. 두 제작 레포는 현재 최초 커밋 전이므로 원격 git clone 가능 여부를 먼저 확인한다.
 2. `waenyamyeon`에서 **Linux Node 22 환경**으로 `npm ci`. `episodes/ep001.json`, `public/anchor/anchor.png`, `public/fonts/`(IBM Plex 및 OFL), `public/sfx/`의 공통 합성 효과음, `instatoon-studio/bible/sheets/core-cast-turnaround-v1.png`를 포함한다. 작업 루트·episodes·public·assets는 컨테이너 사용자 UID 1000이 쓸 수 있어야 한다.

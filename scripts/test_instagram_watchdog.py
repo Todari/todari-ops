@@ -864,6 +864,15 @@ class InstagramWatchdogTest(unittest.TestCase):
             expected_alerts=1,
         )
 
+    def test_gonggu_confirmation_required_alerts_before_due(self):
+        self._assert_gonggu_state(
+            "publication_confirmation_required",
+            detail="기존 컨테이너 발행 결과 확인 필요",
+            now=datetime(2026, 9, 4, 11, 0, tzinfo=KST),
+            expected_ledger_status="expected",
+            expected_alerts=1,
+        )
+
     def test_gonggu_past_due_missing_alerts_once(self):
         self._assert_gonggu_state(
             None,

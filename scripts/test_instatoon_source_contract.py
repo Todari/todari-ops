@@ -60,6 +60,11 @@ class SourceContractTests(unittest.TestCase):
         case['plan']['panels'][0]['beat'] = '표지판을 읽는 주인공'
         p.validate_story(case['plan'], case['body'])
 
+    def test_identifying_information_rule_reaches_every_stage(self):
+        # 제보를 원문 그대로 발췌하므로, 대본·충실도·최종 검수 모두가 같은 범위를 걸러야 한다.
+        for name in ('STORY_RULES', 'FIDELITY_RULES', 'RUBRIC'):
+            self.assertIn(p.IDENTIFIERS, getattr(p, name), name)
+
     def test_script_reviewer_receives_body_only_stage_contract(self):
         with patch.object(p, 'gemini', return_value=GOOD) as model:
             p.review_instatoon_script({'panels': []}, '표지 1장＋본문 6컷')
