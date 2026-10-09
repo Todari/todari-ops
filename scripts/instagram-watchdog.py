@@ -97,23 +97,30 @@ def _atomic_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
-def _post_signed_payload(env_path: Path, payload: dict) -> tuple[bool, str]:
+def _signed_post(env_path: Path, payload: dict) -> requests.Response | str:
+    """서명해 보낸 요청의 응답. 보내지 못했으면 그 이유."""
     env = _env(env_path)
     url = env.get("INSTAGRAM_NOTIFY_URL", "")
     secret = env.get("INSTAGRAM_NOTIFY_SECRET", "")
     if not url or not secret:
-        return False, "notification configuration missing"
+        return "notification configuration missing"
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     try:
-        response = requests.post(
+        return requests.post(
             url,
             data=body,
             headers={"Content-Type": "application/json", "X-Instagram-Signature": signature},
             timeout=15,
         )
     except requests.RequestException as error:
-        return False, type(error).__name__
+        return type(error).__name__
+
+
+def _post_signed_payload(env_path: Path, payload: dict) -> tuple[bool, str]:
+    response = _signed_post(env_path, payload)
+    if isinstance(response, str):
+        return False, response
     return response.ok, f"HTTP {response.status_code}: {response.text[:300]}"
 
 
@@ -161,6 +168,7 @@ def _run_recovery(
     cwd: Path,
     timeout: int = 1800,
 ) -> None:
+    _RECOVERABLE.add(job_id)
     if not ledger.due_for_recovery(job_id):
         return
     try:
@@ -201,10 +209,21 @@ OUTAGE_STREAK = 3
 ACCOUNT_LABELS = {"sector4": "섹터4", "jakkuyagu": "야있날", "jujinmo": "주진모", "gonggu": "공구함"}
 OUTAGE_STALE_AFTER = timedelta(days=3)
 OUTAGE_REMIND_EVERY = timedelta(days=3)
+# 알림 버튼으로 받는 운영자 요청. 봇은 요청을 쌓아 두기만 하고, 워치독이 가져와 원장에만 반영한다.
+OPERATOR_ACTIONS = ("retry", "skip")
+RETRY_STARTED = "자동 복구를 다시 시작했습니다(최대 4회). 게시되면 이 메시지가 바뀌고, 다시 실패하면 새로 알립니다."
+RETRY_REJECTED = "지금은 자동 복구를 실행할 수 없습니다. 복구 시간대가 지났거나 감시 대상에서 빠진 게시물입니다."
+_RECOVERABLE: set[str] = set()  # 이번 실행에서 복구 대상에 오른 작업
 
 
 def _notify(
-    account: str, content_type: str, source_key: str, message: str, alert_level: str = "action"
+    account: str,
+    content_type: str,
+    source_key: str,
+    message: str,
+    alert_level: str = "action",
+    *,
+    actions: list[str] | None = None,
 ) -> bool:
     payload = {
         "status": "failed",
@@ -220,6 +239,8 @@ def _notify(
         "next_retry_at": None,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
     }
+    if actions:
+        payload["actions"] = actions  # 봇이 알림에 붙일 버튼(다시 시도·건너뛰기)
     sent, detail = _post_signed_payload(HOME / "jujinmo" / ".env", payload)
     if not sent:
         print(f"warning: 워치독 알림 전송 실패 — {detail}")
@@ -296,7 +317,9 @@ def _alert_once(
         return
     print(f"경고 발송: {key} [{stage}] — {alert_message}")
     level = alert_level or ALERT_LEVEL_BY_STAGE.get(stage, "action")
-    if _notify(account, content_type, key, alert_message, level):
+    # 자동 복구를 다 쓴 작업만 운영자가 버튼으로 다시 시도시키거나 건너뛸 수 있다.
+    buttons = {"actions": list(OPERATOR_ACTIONS)} if stage == "final_operator_required" else {}
+    if _notify(account, content_type, key, alert_message, level, **buttons):
         ledger.record_alert(key, stage, now=current)
         state.pop(key, None)  # 예전 6시간 중복 방지 키는 더 이상 사용하지 않는다.
 
@@ -306,6 +329,7 @@ def _next_recovery_job(ledger: ReliabilityLedger, jobs: list[tuple]) -> tuple | 
 
     맨 앞 작업만 고르면, 끝나지 않는 작업 하나(예: 정책상 릴스 대상이 아닌 경기)가 뒤 작업을 영영 막는다.
     """
+    _RECOVERABLE.update(job[0] for job in jobs)
     due = [job for job in jobs if ledger.due_for_recovery(job[0])]
     return min(
         due,
@@ -888,6 +912,7 @@ def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> 
                 state.pop(job_id, None)
             elif item["status"] in {"missing", "recovering", "operator_required"}:
                 if item["status"] != "operator_required":
+                    _RECOVERABLE.add(job_id)
                     missing_carousel_job = missing_carousel_job or job_id
 
         missing_reel_job = None
@@ -927,6 +952,8 @@ def check_sector4(state: dict, now_utc: datetime, ledger: ReliabilityLedger) -> 
             if reel_item["status"] == "published":
                 state.pop(reel_job, None)
             elif reel_item["status"] in {"missing", "recovering", "operator_required"}:
+                if reel_item["status"] != "operator_required":
+                    _RECOVERABLE.add(reel_job)
                 if reel_item["status"] != "operator_required" and missing_reel_job is None:
                     missing_reel_job = reel_job
                     missing_reel_session = session_type
@@ -1292,6 +1319,80 @@ def build_weekly_digest_lines(
     return lines
 
 
+def apply_operator_requests(state: dict, ledger: ReliabilityLedger) -> None:
+    """봇에 쌓인 알림 버튼 요청을 가져와 원장에 반영한다. 끝나지 않은 요청은 state["_operator"]에 둔다.
+
+    다시 시도는 복구 횟수를 되돌려 이번 실행의 검사가 평소 복구 명령을 다시 돌리게 하고,
+    건너뛰기는 작업을 취소로 닫는다. 요청이 실행시킬 수 있는 것은 이 두 가지 원장 변경뿐이다.
+    """
+    response = _signed_post(HOME / "jujinmo" / ".env", {"status": "ops_poll"})
+    try:
+        commands = None if isinstance(response, str) or not response.ok else response.json().get("commands")
+    except (ValueError, AttributeError):
+        commands = None
+    if not isinstance(commands, list):
+        return  # 봇이 응답하지 않았다. 처리 중인 요청은 그대로 둔다.
+    tracked = state.get("_operator") if isinstance(state.get("_operator"), dict) else {}
+    current: dict[str, dict] = {}
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        job_id, action, at = command.get("job_id"), command.get("action"), command.get("at")
+        if not isinstance(job_id, str) or action not in OPERATOR_ACTIONS:
+            continue
+        previous = tracked.get(job_id)
+        if isinstance(previous, dict) and previous.get("at") == at:
+            current[job_id] = previous  # 이미 반영한 요청. 결과가 봇에 닿아 요청이 사라질 때까지 남는다.
+            continue
+        entry = {"action": action, "at": at}
+        item = ledger.get(job_id)
+        if not item:
+            entry["result"] = ["rejected", "감시 원장에 없는 게시물입니다."]
+        elif action == "retry":
+            ledger.operator_retry(job_id)
+            entry["fresh"] = True
+        elif item["status"] in {"missing", "recovering", "operator_required"}:
+            ledger.cancel(job_id, detail="운영자가 건너뜀")
+            ledger.record_alert(job_id, "final_cancelled")  # 닫는 알림은 아래 결과 처리에서 보낸다.
+        current[job_id] = entry
+        print(f"운영자 요청 반영: {job_id} [{action}]")
+    state["_operator"] = current
+
+
+def settle_operator_requests(state: dict, ledger: ReliabilityLedger, failed_checks: set[str]) -> list[dict]:
+    """검사가 끝난 뒤 요청마다 결과를 정한다. 생존 신호에 실어 보내면 봇이 그 알림 메시지를 고친다.
+
+    started는 중간 경과고 rejected·done은 요청을 끝낸다. 끝난 결과는 봇이 받을 때까지 매번 다시 보낸다.
+    """
+    results = []
+    tracked = state.get("_operator")
+    for job_id, entry in tracked.items() if isinstance(tracked, dict) else ():
+        item = ledger.get(job_id) or {}
+        status = item.get("status")
+        if "result" in entry:
+            pass
+        elif status == "cancelled":
+            # 건너뛰었거나, 다시 시도했지만 정책상 게시하지 않기로 정리됐다. 닫는 알림이 닿아야 끝난다.
+            detail = "운영자가 건너뜀" if entry["action"] == "skip" else item.get("last_error") or "게시하지 않기로 정리됨"
+            if _notify(item["account"], item["content_type"], job_id, detail, "skipped"):
+                entry["result"] = ["done", ""]
+        elif status == "published":
+            entry["result"] = ["done", "이미 게시된 게시물입니다."]
+        elif entry["action"] == "skip" or status == "operator_required":
+            # 다시 시도한 주기가 또 실패했다(검사가 새 확인 필요 알림을 보낸다). 또는 건너뛸 것이 없었다.
+            entry["result"] = ["done", ""]
+        elif job_id in _RECOVERABLE:
+            if entry.pop("fresh", False):
+                results.append({"job_id": job_id, "at": entry["at"], "state": "started", "detail": RETRY_STARTED})
+        elif job_id.split(":")[0] not in failed_checks:
+            # 복구 시간대가 지났거나 감시 대상에서 빠졌다. 영영 '복구 중'으로 남지 않게 확인 필요로 되돌린다.
+            ledger.close_retry(job_id, detail="운영자 재시도 — 복구할 수 없는 시점")
+            entry["result"] = ["rejected", RETRY_REJECTED]
+        if "result" in entry:
+            results.append({"job_id": job_id, "at": entry["at"], "state": entry["result"][0], "detail": entry["result"][1]})
+    return results
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1312,6 +1413,12 @@ def main(argv: list[str] | None = None) -> None:
     now = datetime.now(KST)
     state = _load_state()
     ledger = ReliabilityLedger(LEDGER_PATH)
+    _RECOVERABLE.clear()
+    try:
+        apply_operator_requests(state, ledger)
+    except Exception as error:  # noqa: BLE001 - 버튼 요청 처리 실패가 감시를 막지 않는다
+        print(f"warning: 운영자 요청 반영 실패 — {type(error).__name__}: {error}")
+    failed_checks: set[str] = set()
     for name, check, arg in (
         ("jujinmo", check_jujinmo, now),
         ("jakkuyagu", check_jakkuyagu, now),
@@ -1321,6 +1428,7 @@ def main(argv: list[str] | None = None) -> None:
         try:
             check(state, arg, ledger)
         except Exception as error:  # noqa: BLE001 - 한 계정 실패가 다른 검사를 막지 않는다
+            failed_checks.add(name)
             print(f"warning: {name} 검사 실패 — {type(error).__name__}: {error}")
     try:
         outbox = flush_notification_outboxes()
@@ -1342,6 +1450,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"warning: 게시 중단 검사 실패 — {type(error).__name__}: {error}")
     # 봇의 /healthz가 이 신호의 신선도를 본다. 크론이 멈추면 외부 감시가 알린다.
     heartbeat = {"status": "heartbeat"}
+    try:
+        results = settle_operator_requests(state, ledger, failed_checks)
+        if results:
+            heartbeat["ops_results"] = results
+    except Exception as error:  # noqa: BLE001 - 요청 결과 실패가 생존 신호를 막지 않는다
+        print(f"warning: 운영자 요청 결과 실패 — {type(error).__name__}: {error}")
     try:
         heartbeat["board"] = build_status_board(now, ledger, state.get("_publish_outage"))
         heartbeat["brief"] = build_daily_brief(now, ledger, state.get("_publish_outage"))

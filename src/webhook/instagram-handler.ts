@@ -17,7 +17,10 @@ import { env } from "../env.js";
 import {
   findProblemKey,
   getProblemMessage,
+  PROBLEM_ACTIONS,
+  problemEntries,
   setProblemMessage,
+  type ProblemAction,
   type ProblemMessage,
 } from "./instagram-problems.js";
 
@@ -58,6 +61,7 @@ const ALERT_LEVELS = {
   outage: { color: 0xed4245, title: "게시 중단", silent: false, mention: true },
   outage_resolved: { color: 0x57f287, title: "게시 재개", silent: false, mention: false },
   outage_closed: { color: 0x95a5a6, title: "게시 중단 종료 · 새 예정 없음", silent: true, mention: false },
+  skipped: { color: 0x95a5a6, title: "게시 건너뜀", silent: true, mention: false },
 } as const;
 
 type AlertLevel = keyof typeof ALERT_LEVELS;
@@ -68,8 +72,20 @@ const ACTION_CHANNEL_LEVELS: ReadonlySet<AlertLevel> = new Set([
   "outage_closed",
 ]);
 export const ACK_BUTTON_ID = "igack";
+// 워치독이 actions로 허용한 알림에만 붙는 조치 버튼. 누르면 요청을 적어 두고 워치독이 가져가 처리한다.
+export const OPS_BUTTON_ID = "igop";
+const ACTION_LABELS: Record<ProblemAction, { button: string; requested: string }> = {
+  retry: { button: "다시 시도", requested: "🔁 다시 시도 요청" },
+  skip: { button: "건너뛰기", requested: "⏭ 건너뛰기 요청" },
+};
+const REQUEST_FIELD = "운영자 조치";
 // 문제를 닫는 수준. 같은 문제로 먼저 올린 메시지가 있으면 새로 보내지 않고 그 메시지를 고친다.
-const CLOSING_LEVELS: ReadonlySet<AlertLevel> = new Set(["recovered", "outage_resolved", "outage_closed"]);
+const CLOSING_LEVELS: ReadonlySet<AlertLevel> = new Set([
+  "recovered",
+  "outage_resolved",
+  "outage_closed",
+  "skipped",
+]);
 
 export interface InstagramPostEvent {
   status: "published";
@@ -106,6 +122,8 @@ export interface InstagramFailureEvent {
   nextRetryAt: string | null;
   occurredAt: string;
   alertLevel?: AlertLevel;
+  /** 워치독이 이 알림에 허용한 조치 버튼. */
+  actions?: ProblemAction[];
 }
 
 export interface InstagramDigestEvent {
@@ -181,6 +199,10 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
       nextRetryAt,
       occurredAt: new Date(occurredAt).toISOString(),
       alertLevel,
+      // 모르는 조치는 버린다.
+      ...(Array.isArray(raw.actions)
+        ? { actions: PROBLEM_ACTIONS.filter((action) => (raw.actions as unknown[]).includes(action)) }
+        : {}),
     };
   }
   if (status !== "published") return null;
@@ -368,14 +390,26 @@ function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions
     message.content = `<@${env.OWNER_DISCORD_ID}>`;
     message.allowedMentions = { users: [env.OWNER_DISCORD_ID] };
     // 멘션으로 부른 알림은 "확인함"으로 다시 알림을 끌 수 있다. 버튼은 둘째 줄에 둔다(확인 뒤 이 줄만 뗀다).
-    message.components = [
-      ...(message.components ?? []),
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(ACK_BUTTON_ID).setLabel("확인함").setStyle(ButtonStyle.Secondary),
-      ),
-    ];
+    message.components = [...(message.components ?? []), ownerButtons(event.actions ?? [])];
   }
   return message;
+}
+
+function ownerButtons(actions: readonly ProblemAction[]): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(ACK_BUTTON_ID).setLabel("확인함").setStyle(ButtonStyle.Secondary),
+    ...actions.map((action) =>
+      new ButtonBuilder()
+        .setCustomId(`${OPS_BUTTON_ID}:${action}`)
+        .setLabel(ACTION_LABELS[action].button)
+        .setStyle(ButtonStyle.Secondary),
+    ),
+  );
+}
+
+/** 같은 이름의 칸이 있으면 바꾸고 없으면 붙인다. */
+function withField(embed: EmbedBuilder, name: string, value: string): EmbedBuilder {
+  return embed.setFields([...(embed.data.fields ?? []).filter((field) => field.name !== name), { name, value }]);
 }
 
 /** "확인함" 버튼: 메시지를 회색으로 바꾸고 멘션을 지운다. 문제가 닫힐 때까지 같은 문제를 다시 알리지 않는다. */
@@ -392,6 +426,75 @@ export async function acknowledgeProblem(interaction: ButtonInteraction): Promis
     embeds: [embed],
     components: interaction.message.components.slice(0, 1),
   });
+}
+
+/**
+ * "다시 시도"·"건너뛰기" 버튼: 요청을 문제 기록에 적어 둔다. 워치독이 다음 실행(15분 이내) 때 가져가
+ * 원장에 반영하고 결과를 생존 신호로 돌려준다. 봇이 호스트에서 무엇을 실행시키는 경로는 없다.
+ */
+export async function requestProblemAction(interaction: ButtonInteraction, action: string): Promise<void> {
+  const key = findProblemKey(interaction.message.id);
+  const problem = key ? getProblemMessage(key) : undefined;
+  // 워치독이 이 알림에 허용한 조치만 받는다.
+  const allowed = problem?.actions?.find((candidate) => candidate === action);
+  if (!key || !problem || !allowed) {
+    await interaction.reply({ content: "이미 닫혔거나 바뀐 알림입니다.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const at = Date.now();
+  setProblemMessage(key, { ...problem, request: { action: allowed, at } });
+  const embed = withField(
+    EmbedBuilder.from(interaction.message.embeds[0]),
+    REQUEST_FIELD,
+    `${ACTION_LABELS[allowed].requested} · <t:${Math.floor(at / 1000)}:t> — 다음 감시(15분 이내) 때 반영됩니다.`,
+  );
+  await interaction.update({
+    content: null,
+    embeds: [embed],
+    components: interaction.message.components.slice(0, 1),
+  });
+}
+
+/** 워치독이 가져갈 요청 목록. 문제의 sourceKey가 워치독 원장의 job_id다. */
+export function pendingProblemRequests(): Array<{ job_id: string; action: ProblemAction; at: number }> {
+  return problemEntries().flatMap(([key, problem]) =>
+    problem.request ? [{ job_id: key.slice(key.indexOf(":") + 1), ...problem.request }] : [],
+  );
+}
+
+/**
+ * 워치독이 돌려준 요청 결과. started는 중간 경과라 요청을 남기고, rejected·done은 요청을 끝낸다.
+ * 문제가 그사이 닫혔거나 새 알림으로 바뀌었으면(요청이 없으면) 무시한다.
+ */
+export async function applyProblemResults(results: unknown): Promise<void> {
+  if (!Array.isArray(results)) return;
+  for (const raw of results as Array<Record<string, unknown> | null>) {
+    const entry = problemEntries().find(
+      ([key, value]) => value.request?.at === raw?.at && key.slice(key.indexOf(":") + 1) === raw?.job_id,
+    );
+    if (!entry || !raw) continue;
+    const [key, { request: _request, ...problem }] = entry;
+    const rejected = raw.state === "rejected";
+    if (raw.state !== "started") setProblemMessage(key, problem);
+    if (typeof raw.detail !== "string" || !raw.detail) continue;
+    try {
+      const channel = await fetchTextChannel(problem.channelId, "instagram-problem");
+      const message = await channel?.messages.fetch(problem.messageId);
+      if (!message) continue;
+      const embed = withField(
+        EmbedBuilder.from(message.embeds[0]),
+        REQUEST_FIELD,
+        `${rejected ? "⚠️" : "🔁"} ${truncate(raw.detail, 900)}`,
+      );
+      // 거절된 요청은 버튼을 되살려 다시 고를 수 있게 한다.
+      await message.edit({
+        embeds: [embed],
+        components: [...message.components.slice(0, 1), ...(rejected ? [ownerButtons(problem.actions ?? [])] : [])],
+      });
+    } catch (err) {
+      console.warn("[instagram] problem request result edit failed:", err);
+    }
+  }
 }
 
 /** 같은 게시기의 네트워크 재시도는 한 번만 Discord에 표시한다. */
@@ -440,7 +543,12 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
         const old = await fetchTextChannel(prior.channelId, "instagram-problem");
         await old?.messages.delete(prior.messageId).catch(() => {});
       }
-      setProblemMessage(problemKey, { channelId: sent.channelId, messageId: sent.id, at: now });
+      setProblemMessage(problemKey, {
+        channelId: sent.channelId,
+        messageId: sent.id,
+        at: now,
+        ...(event.status === "failed" && event.actions?.length ? { actions: event.actions } : {}),
+      });
     }
   }
   if (problemKey && closing && prior) setProblemMessage(problemKey, null);

@@ -8,7 +8,12 @@ import { handleVercelEvent } from "./vercel-handler.js";
 import { normalizeVaultState, saveVaultState } from "../vault/state.js";
 import { updateDailyTopic } from "../digest/daily.js";
 import { jpExport } from "../jp/export.js";
-import { handleInstagramEvent, normalizeInstagramEvent } from "./instagram-handler.js";
+import {
+  applyProblemResults,
+  handleInstagramEvent,
+  normalizeInstagramEvent,
+  pendingProblemRequests,
+} from "./instagram-handler.js";
 import { getDiscordClient } from "../discord/client.js";
 import { isDiscordConnected, runtimeHealth } from "../monitor/health.js";
 import { saveInstagramBrief, updateStatusBoard } from "../monitor/status-board.js";
@@ -119,11 +124,18 @@ async function handleInstagramWebhook(
   }
   const payload = parseJson(body, res);
   if (payload === undefined) return;
-  if ((payload as { status?: unknown } | null)?.status === "heartbeat") {
+  const status = (payload as { status?: unknown } | null)?.status;
+  if (status === "ops_poll") {
+    // 워치독이 실행을 시작하며 알림 버튼 요청(다시 시도·건너뛰기)을 가져간다.
+    writeJson(res, 200, { ok: true, commands: pendingProblemRequests() });
+    return;
+  }
+  if (status === "heartbeat") {
     runtimeHealth.completeCheck(WATCHDOG_CHECK);
     // 생존 신호에 실려 온 인스타 현황으로 상태판을 고쳐 쓰고, 어제 실적은 아침 다이제스트용으로 둔다.
     // 실패해도 생존 신호는 받은 것이다.
-    const { board, brief } = payload as { board?: unknown; brief?: unknown };
+    const { board, brief, ops_results } = payload as { board?: unknown; brief?: unknown; ops_results?: unknown };
+    void applyProblemResults(ops_results).catch((err) => console.warn("[instagram] request results failed:", err));
     if (typeof brief === "string" && brief) saveInstagramBrief(brief.slice(0, 1000));
     void updateStatusBoard(typeof board === "string" && board ? board.slice(0, 1000) : null).catch(
       (err) => console.warn("[status] board update failed:", err),

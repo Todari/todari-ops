@@ -221,6 +221,42 @@ class ReliabilityLedgerTest(unittest.TestCase):
             self.assertIsNone(reset["next_recovery_at"])
             ledger.close()
 
+    def test_operator_retry_starts_a_fresh_cycle_and_can_be_closed_again(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            now = datetime(2026, 9, 7, 1, 0, tzinfo=UTC)
+            job_id = "jujinmo:close:2026-09-07"
+            ledger.sync(
+                job_id=job_id,
+                account="jujinmo",
+                content_type="close_explainer",
+                source_key="2026-09-07",
+                expected_at=now - timedelta(hours=2),
+                due_at=now - timedelta(hours=1),
+                published=False,
+                now=now,
+            )
+            ledger.record_alert(job_id, "initial", now=now)
+            # 확인 필요가 아닌 작업은 건드리지 않는다.
+            self.assertFalse(ledger.operator_retry(job_id, now=now))
+            for _ in range(4):
+                ledger.record_recovery(job_id, succeeded=False, detail="복구 실패", now=now)
+            ledger.record_alert(job_id, "final_operator_required", now=now)
+
+            later = now + timedelta(hours=1)
+            self.assertTrue(ledger.operator_retry(job_id, now=later))
+            item = ledger.get(job_id)
+            self.assertEqual((item["status"], item["recovery_attempts"]), ("missing", 0))
+            self.assertTrue(ledger.due_for_recovery(job_id, now=later))
+            # 알림 주기를 새로 시작해, 다시 실패하면 확인 필요를 한 번 더 알릴 수 있다.
+            self.assertFalse(ledger.has_final_alert(job_id))
+            self.assertEqual(ledger.alert_time(job_id, "initial"), later)
+
+            ledger.close_retry(job_id, detail="복구 시간대 종료", now=later)
+            self.assertEqual(ledger.get(job_id)["status"], "operator_required")
+            self.assertTrue(ledger.has_final_alert(job_id))
+            ledger.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -751,6 +751,9 @@ class InstagramWatchdogTest(unittest.TestCase):
 
                     self.assertEqual(notify.call_count, 2)
                     self.assertIn("운영자 확인 필요", notify.call_args_list[1].args[3])
+                    # 자동 복구를 다 쓴 알림에만 버튼(다시 시도·건너뛰기)을 싣는다.
+                    self.assertEqual(notify.call_args_list[0].kwargs, {})
+                    self.assertEqual(notify.call_args_list[1].kwargs, {"actions": ["retry", "skip"]})
 
                     # 확인 필요로 넘긴 뒤 게시되면 그 알림을 닫으라고 한 번만 알린다.
                     stamp = datetime(2026, 9, 7, 1, 0, tzinfo=timezone.utc)
@@ -1145,6 +1148,89 @@ class InstagramWatchdogTest(unittest.TestCase):
                     self.assertEqual(
                         ledger.get("gonggu:daily:2026-09-04")["last_error"], detail
                     )
+            finally:
+                ledger.close()
+
+    def _operator_required_job(self, ledger, job_id):
+        self._missing_job(ledger, job_id)
+        ledger.record_alert(job_id, "initial")
+        for _ in range(4):
+            ledger.record_recovery(job_id, succeeded=False, detail="복구 실패")
+        ledger.record_alert(job_id, "final_operator_required")
+
+    def _poll(self, *commands):
+        response = Mock(ok=True)
+        response.json.return_value = {"ok": True, "commands": list(commands)}
+        return patch.object(watchdog, "_signed_post", return_value=response)
+
+    def test_operator_retry_restarts_recovery_and_reports_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            job_id = "jujinmo:close:2026-09-07"
+            self._operator_required_job(ledger, job_id)
+            command = {"job_id": job_id, "action": "retry", "at": 1}
+            state = {}
+            try:
+                watchdog._RECOVERABLE.clear()
+                with self._poll(command, {"job_id": job_id, "action": "rm -rf", "at": 2}, "x"):
+                    watchdog.apply_operator_requests(state, ledger)
+                self.assertTrue(ledger.due_for_recovery(job_id))
+                # 검사가 이 작업을 복구 대상으로 올린 실행: 다시 시작했다고 한 번만 알린다.
+                watchdog._RECOVERABLE.add(job_id)
+                started = [{"job_id": job_id, "at": 1, "state": "started", "detail": watchdog.RETRY_STARTED}]
+                self.assertEqual(watchdog.settle_operator_requests(state, ledger, set()), started)
+                self.assertEqual(watchdog.settle_operator_requests(state, ledger, set()), [])
+
+                # 같은 요청이 다시 와도(결과가 아직 봇에 닿지 않음) 복구 횟수를 또 되돌리지 않는다.
+                ledger.record_recovery(job_id, succeeded=False, detail="복구 실패")
+                with self._poll(command):
+                    watchdog.apply_operator_requests(state, ledger)
+                self.assertEqual(ledger.get(job_id)["recovery_attempts"], 1)
+
+                # 검사가 실패한 실행에서는 판단을 미룬다.
+                watchdog._RECOVERABLE.clear()
+                self.assertEqual(watchdog.settle_operator_requests(state, ledger, {"jujinmo"}), [])
+                # 복구 시간대가 지나 대상에서 빠지면 확인 필요로 되돌리고, 봇이 받을 때까지 결과를 다시 보낸다.
+                rejected = [{"job_id": job_id, "at": 1, "state": "rejected", "detail": watchdog.RETRY_REJECTED}]
+                with patch.object(watchdog, "_notify") as notify:
+                    self.assertEqual(watchdog.settle_operator_requests(state, ledger, set()), rejected)
+                    self.assertEqual(watchdog.settle_operator_requests(state, ledger, set()), rejected)
+                notify.assert_not_called()
+                self.assertEqual(ledger.get(job_id)["status"], "operator_required")
+                self.assertTrue(ledger.has_final_alert(job_id))
+
+                # 봇이 결과를 받아 요청을 지우면 추적도 끝난다. 봇이 응답하지 않을 때는 그대로 둔다.
+                with patch.object(watchdog, "_signed_post", return_value="ConnectionError"):
+                    watchdog.apply_operator_requests(state, ledger)
+                self.assertIn(job_id, state["_operator"])
+                with self._poll():
+                    watchdog.apply_operator_requests(state, ledger)
+                self.assertEqual(state["_operator"], {})
+            finally:
+                ledger.close()
+
+    def test_operator_skip_cancels_the_job_and_closes_the_alert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            job_id = "jakkuyagu:flow-reel:game-1"
+            self._operator_required_job(ledger, job_id)
+            state = {}
+            try:
+                with self._poll({"job_id": job_id, "action": "skip", "at": 5}, {"job_id": "x:y:z", "action": "skip", "at": 6}):
+                    watchdog.apply_operator_requests(state, ledger)
+                item = ledger.get(job_id)
+                self.assertEqual((item["status"], item["policy_cancelled"]), ("cancelled", 0))
+                self.assertFalse(watchdog._job_needs_alert_check(ledger, item))
+                unknown = {"job_id": "x:y:z", "at": 6, "state": "rejected", "detail": "감시 원장에 없는 게시물입니다."}
+                # 닫는 알림이 봇에 닿지 않으면 끝내지 않고 다음 실행에 다시 보낸다.
+                with patch.object(watchdog, "_notify", return_value=False):
+                    self.assertEqual(watchdog.settle_operator_requests(state, ledger, set()), [unknown])
+                with patch.object(watchdog, "_notify", return_value=True) as notify:
+                    self.assertEqual(
+                        watchdog.settle_operator_requests(state, ledger, set()),
+                        [{"job_id": job_id, "at": 5, "state": "done", "detail": ""}, unknown],
+                    )
+                notify.assert_called_once_with("jakkuyagu", "game-flow-reel", job_id, "운영자가 건너뜀", "skipped")
             finally:
                 ledger.close()
 

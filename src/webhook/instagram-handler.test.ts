@@ -4,9 +4,12 @@ import { dirname } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   acknowledgeProblem,
+  applyProblemResults,
   buildInstagramMessage,
   handleInstagramEvent,
   normalizeInstagramEvent,
+  pendingProblemRequests,
+  requestProblemAction,
 } from "./instagram-handler.js";
 
 const mocks = vi.hoisted(() => {
@@ -551,4 +554,73 @@ describe("watchdog alert levels", () => {
       );
     },
   );
+
+  it("lets the owner retry or skip a job from the alert, and shows what the watchdog did with it", async () => {
+    for (const mock of [mocks.alertsSend, mocks.fetchMessage]) mock.mockClear();
+    const jobId = "jakkuyagu:flow-reel:game-9";
+    const deliver = (extra: object) =>
+      handleInstagramEvent(normalizeInstagramEvent({ ...watchdogPayload, source_key: jobId, ...extra })!);
+    const rows = (components: Array<{ toJSON(): unknown }>) => components.map((row) => row.toJSON());
+    const pending = () => pendingProblemRequests().filter((request) => request.job_id === jobId);
+    const actionFields = (call: number) =>
+      edit.mock.calls[call]![0].embeds[0].toJSON().fields.filter((field: { name: string }) => field.name === "운영자 조치");
+
+    // 워치독이 허용한 조치만 버튼으로 붙는다. 모르는 조치는 버린다.
+    expect(await deliver({ alert_level: "action", actions: ["retry", "skip", "rm -rf"] })).toBe(true);
+    const sent = mocks.alertsSend.mock.calls[0]![0];
+    const id = (await mocks.alertsSend.mock.results[0]!.value).id;
+    expect(rows(sent.components)[1]).toMatchObject({
+      components: [
+        { custom_id: "igack" },
+        { custom_id: "igop:retry", label: "다시 시도" },
+        { custom_id: "igop:skip", label: "건너뛰기" },
+      ],
+    });
+
+    // 다시 시도: 요청을 적어 두고 버튼 줄을 뗀다. 워치독이 가져갈 목록에 오른다.
+    const update = vi.fn();
+    await requestProblemAction({ message: { id, ...sent }, update } as never, "retry");
+    expect(update.mock.calls[0]![0]).toMatchObject({ content: null, components: [sent.components[0]] });
+    expect(update.mock.calls[0]![0].embeds[0].toJSON().fields.at(-1)).toMatchObject({
+      name: "운영자 조치",
+      value: expect.stringContaining("다시 시도 요청"),
+    });
+    expect(pending()).toMatchObject([{ job_id: jobId, action: "retry" }]);
+    const { at } = pending()[0]!;
+
+    // 중간 경과(started)는 칸만 바꾸고 요청을 남긴다. 다른 요청의 결과는 무시한다.
+    const edit = vi.fn();
+    mocks.fetchMessage.mockResolvedValue({ ...sent, embeds: update.mock.calls[0]![0].embeds, edit });
+    await applyProblemResults([
+      { job_id: jobId, at, state: "started", detail: "자동 복구를 다시 시작했습니다." },
+      null,
+      { job_id: jobId, at: at - 1, state: "done", detail: "지난 요청" },
+    ]);
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(actionFields(0)).toEqual([{ name: "운영자 조치", value: "🔁 자동 복구를 다시 시작했습니다." }]);
+    expect(edit.mock.calls[0]![0].components).toEqual([sent.components[0]]);
+    expect(pending()).toHaveLength(1);
+
+    // 거절: 요청을 끝내고 버튼을 되살린다.
+    await applyProblemResults([{ job_id: jobId, at, state: "rejected", detail: "지금은 실행할 수 없습니다." }]);
+    expect(actionFields(1)).toEqual([{ name: "운영자 조치", value: "⚠️ 지금은 실행할 수 없습니다." }]);
+    expect(rows(edit.mock.calls[1]![0].components.slice(1))).toMatchObject([
+      { components: [{ custom_id: "igack" }, { custom_id: "igop:retry" }, { custom_id: "igop:skip" }] },
+    ]);
+    expect(pending()).toEqual([]);
+
+    // 건너뛰기: 워치독이 보낸 닫는 알림이 같은 메시지를 회색으로 닫고 요청도 사라진다.
+    await requestProblemAction({ message: { id, ...sent }, update } as never, "skip");
+    expect(pending()).toMatchObject([{ action: "skip" }]);
+    expect(await deliver({ alert_level: "skipped", error_message: "운영자가 건너뜀" })).toBe(true);
+    expect(edit.mock.calls[2]![0].embeds[0].toJSON()).toMatchObject({ color: 0x95a5a6, title: "야있날 게시 건너뜀" });
+    expect(pending()).toEqual([]);
+    expect(mocks.alertsSend).toHaveBeenCalledTimes(1);
+
+    // 닫힌 알림의 버튼, 모르는 조치는 요청으로 받지 않는다.
+    const reply = vi.fn();
+    await requestProblemAction({ message: { id, ...sent }, reply } as never, "retry");
+    expect(reply.mock.calls[0]![0].content).toContain("이미 닫혔거나");
+    mocks.fetchMessage.mockReset();
+  });
 });

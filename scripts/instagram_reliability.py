@@ -266,6 +266,47 @@ class ReliabilityLedger:
         self.connection.commit()
         return cursor.rowcount
 
+    def operator_retry(self, job_id: str, *, now: datetime | None = None) -> bool:
+        """운영자가 알림 버튼으로 '확인 필요' 작업을 다시 시도시킨다.
+
+        복구 횟수와 알림 주기를 새로 시작한다. 이번 주기가 게시로 끝나면 지연 게시 완료를,
+        다시 실패하면 확인 필요를 한 번 더 알릴 수 있게 지난 알림 기록을 지우고 지금을 최초 알림으로 둔다.
+        """
+        stamp = _timestamp(now or datetime.now(timezone.utc))
+        cursor = self.connection.execute(
+            """
+            UPDATE jobs
+            SET status='missing', recovery_attempts=0, next_recovery_at=NULL,
+                last_error='운영자 재시도 요청', resolved_at=NULL, updated_at=?
+            WHERE job_id=? AND status='operator_required'
+            """,
+            (stamp, job_id),
+        )
+        if cursor.rowcount:
+            self.connection.execute("DELETE FROM alert_events WHERE job_id=?", (job_id,))
+            self.connection.execute(
+                "INSERT INTO alert_events (job_id, stage, sent_at) VALUES (?, 'initial', ?)",
+                (job_id, stamp),
+            )
+        self.connection.commit()
+        return bool(cursor.rowcount)
+
+    def close_retry(self, job_id: str, *, detail: str, now: datetime | None = None) -> None:
+        """다시 시도한 작업을 더 복구할 수 없을 때 '확인 필요'로 되돌린다. 새로 알리지 않는다."""
+        stamp = _timestamp(now or datetime.now(timezone.utc))
+        cursor = self.connection.execute(
+            """
+            UPDATE jobs
+            SET status='operator_required', next_recovery_at=NULL, last_error=?,
+                updated_at=?, resolved_at=?
+            WHERE job_id=? AND status IN ('missing', 'recovering')
+            """,
+            (detail[:1000], stamp, stamp, job_id),
+        )
+        self.connection.commit()
+        if cursor.rowcount:
+            self.record_alert(job_id, "final_operator_required", now=now)
+
     def cancel(
         self,
         job_id: str,

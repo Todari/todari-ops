@@ -12,7 +12,14 @@ export interface ProblemMessage {
   at: number;
   /** 소유자가 "확인함"을 눌렀다. 닫힐 때까지 같은 문제를 다시 알리지 않는다. */
   acked?: boolean;
+  /** 이 알림에 붙인 조치 버튼. 거절된 요청 뒤에 버튼을 되살릴 때 쓴다. */
+  actions?: ProblemAction[];
+  /** 소유자가 버튼으로 요청한 조치. 워치독이 가져가 처리하고 결과를 돌려줄 때까지 남는다. */
+  request?: { action: ProblemAction; at: number };
 }
+
+export const PROBLEM_ACTIONS = ["retry", "skip"] as const;
+export type ProblemAction = (typeof PROBLEM_ACTIONS)[number];
 
 const FILE = path.resolve(env.WORK_DIR, "..", "instagram-problems.json");
 // 닫히지 않고 남는 기록(지난 회차의 "확인 필요" 등)은 이 기간 뒤 버린다.
@@ -27,6 +34,10 @@ export function getProblemMessage(key: string): ProblemMessage | undefined {
 
 export function findProblemKey(messageId: string): string | undefined {
   return Object.entries(load()).find(([, value]) => value.messageId === messageId)?.[0];
+}
+
+export function problemEntries(): Array<[string, ProblemMessage]> {
+  return Object.entries(load());
 }
 
 /** value가 null이면 기록을 지운다. */
