@@ -257,7 +257,7 @@ class InstagramWatchdogTest(unittest.TestCase):
             job(2, "market_term_explainer", True)  # 다른 유형의 게시가 연속을 끊지 않는다.
             state: dict = {}
             sent: list[dict] = []
-            results = iter([True, False, True, True])
+            results = iter([True, True, False, True, True])
 
             def capture(_env_path, payload):
                 ok = next(results)
@@ -274,10 +274,15 @@ class InstagramWatchdogTest(unittest.TestCase):
                 watchdog.check_publish_outage(state, now, ledger)
                 watchdog.check_publish_outage(state, now, ledger)  # 열려 있는 동안 다시 보내지 않는다.
                 self.assertEqual(len(sent), 1)
-                # 새 예정이 사흘 넘게 없으면 알림 없이 닫고, 다시 열지도 않는다.
+                # 새 예정이 사흘 넘게 없으면 처음 경보를 닫으라고만 알리고(푸시 없음), 다시 열지 않는다.
                 stale = dict(state["_publish_outage"])
                 watchdog.check_publish_outage(state, now + timedelta(days=4), ledger)
-                self.assertEqual((state["_publish_outage"], len(sent)), ({}, 1))
+                watchdog.check_publish_outage(state, now + timedelta(days=4), ledger)
+                self.assertEqual((state["_publish_outage"], len(sent)), ({}, 2))
+                self.assertEqual(
+                    (sent[1]["alert_level"], sent[1]["source_key"]), ("outage_closed", sent[0]["source_key"])
+                )
+                del sent[1]
                 state["_publish_outage"] = stale
                 job(4, "close_explainer", True)
                 now = base + timedelta(days=4, hours=2)
@@ -687,8 +692,25 @@ class InstagramWatchdogTest(unittest.TestCase):
                         now=now + timedelta(hours=6),
                     )
 
-                self.assertEqual(notify.call_count, 2)
-                self.assertIn("운영자 확인 필요", notify.call_args_list[1].args[3])
+                    self.assertEqual(notify.call_count, 2)
+                    self.assertIn("운영자 확인 필요", notify.call_args_list[1].args[3])
+
+                    # 확인 필요로 넘긴 뒤 게시되면 그 알림을 닫으라고 한 번만 알린다.
+                    stamp = datetime(2026, 9, 7, 1, 0, tzinfo=timezone.utc)
+                    item = ledger.sync(
+                        job_id=job_id, account="jakkuyagu", content_type="game-flow-reel",
+                        source_key="2026-09-07:flow-reel:game-1", expected_at=stamp - timedelta(hours=2),
+                        due_at=stamp - timedelta(hours=1), published=True, now=now + timedelta(hours=7),
+                    )
+                    for _ in range(2):
+                        if watchdog._job_needs_alert_check(ledger, item):
+                            watchdog._alert_once(
+                                {}, ledger, job_id, "jujinmo", "close", "종가 콘텐츠", now=now + timedelta(hours=7)
+                            )
+                    self.assertEqual(notify.call_count, 3)
+                    self.assertEqual(
+                        notify.call_args_list[2].args[2:], (job_id, "확인 필요 건 게시 완료 — 종가 콘텐츠", "recovered")
+                    )
             finally:
                 ledger.close()
 

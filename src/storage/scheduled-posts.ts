@@ -2,9 +2,9 @@
 // /data 볼륨의 JSON 에 남겨, 예약 시각에 봇이 내려가 있었으면(배포·재시작) 다음
 // 시작 때 따라잡고 같은 날 두 번 게시하지 않는다. 수동 명령(/digest 등)은 기록하지 않는다.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { env } from "../env.js";
+import { readJsonObject, writeJsonObject } from "./json-file.js";
 
 const FILE = path.resolve(env.WORK_DIR, "..", "scheduled-posts.json");
 const KST_MS = 9 * 3600_000;
@@ -12,17 +12,7 @@ const DAY_MS = 86_400_000;
 
 let lastPosted: Record<string, string> | null = null; // 예약 이름 → YYYY-MM-DD (KST)
 
-function load(): Record<string, string> {
-  if (lastPosted) return lastPosted;
-  try {
-    const raw: unknown = existsSync(FILE) ? JSON.parse(readFileSync(FILE, "utf8")) : {};
-    const valid = raw && typeof raw === "object" && !Array.isArray(raw);
-    lastPosted = valid ? (raw as Record<string, string>) : {};
-  } catch {
-    lastPosted = {};
-  }
-  return lastPosted;
-}
+const load = () => (lastPosted ??= readJsonObject<string>(FILE));
 
 function kstDate(ms: number): string {
   return new Date(ms + KST_MS).toISOString().slice(0, 10);
@@ -57,14 +47,6 @@ export function claimTodayKst(name: string): boolean {
   const today = kstDate(Date.now());
   if (state[name] === today) return false;
   state[name] = today;
-  try {
-    // 동기 쓰기: 시작 시 여러 예약이 한꺼번에 기록해도 tmp 파일이 겹치지 않는다.
-    mkdirSync(path.dirname(FILE), { recursive: true });
-    const tmp = FILE + ".tmp";
-    writeFileSync(tmp, JSON.stringify(state, null, 2));
-    renameSync(tmp, FILE);
-  } catch (err) {
-    console.warn("[scheduled] persist failed:", err);
-  }
+  writeJsonObject(FILE, state);
   return true;
 }

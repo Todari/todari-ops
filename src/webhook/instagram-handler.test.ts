@@ -1,23 +1,34 @@
 import { MessageFlags } from "discord.js";
-import { describe, expect, it, vi } from "vitest";
+import { rmSync } from "node:fs";
+import { dirname } from "node:path";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   buildInstagramMessage,
   handleInstagramEvent,
   normalizeInstagramEvent,
 } from "./instagram-handler.js";
 
-const mocks = vi.hoisted(() => ({
-  env: { OWNER_DISCORD_ID: "owner" },
-  send: vi.fn(),
-  alertsSend: vi.fn(),
-  digestSend: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  let nextId = 0;
+  // 채널이 돌려주는 메시지: 문제 메시지 저장소가 위치(channelId·id)를 기억했다가 고친다.
+  const sender = (channelId: string) => vi.fn(async (_message: any) => ({ id: `m${++nextId}`, channelId }));
+  return {
+    // 문제 메시지 저장소가 WORK_DIR 옆에 파일을 쓴다.
+    env: { OWNER_DISCORD_ID: "owner", WORK_DIR: `${process.env.TMPDIR ?? "/tmp"}/ig-handler-test-${process.pid}/work` },
+    send: sender("log"),
+    alertsSend: sender("alerts"),
+    digestSend: sender("digest"),
+    fetchMessage: vi.fn(),
+  };
+});
 vi.mock("../env.js", () => ({ env: mocks.env }));
 vi.mock("../discord/alerts.js", () => ({
   fetchInstagramChannel: async () => ({ send: mocks.send }),
   fetchAlertsChannel: async () => ({ send: mocks.alertsSend }),
   fetchDigestChannel: async () => ({ send: mocks.digestSend }),
+  fetchTextChannel: async () => ({ messages: { fetch: mocks.fetchMessage } }),
 }));
+afterAll(() => rmSync(dirname(mocks.env.WORK_DIR), { recursive: true, force: true }));
 
 const validPayload = {
   account: "jakkuyagu",
@@ -344,7 +355,7 @@ describe("watchdog alert levels", () => {
     const deliver = (alert_level: string, source_key: string) =>
       handleInstagramEvent(normalizeInstagramEvent({ ...watchdogPayload, alert_level, source_key })!);
 
-    for (const level of ["delay", "recovered", "action", "outage", "outage_resolved"]) {
+    for (const level of ["delay", "recovered", "action", "outage", "outage_resolved", "outage_closed"]) {
       expect(await deliver(level, `routing:${level}`)).toBe(true);
     }
     expect(
@@ -356,8 +367,67 @@ describe("watchdog alert levels", () => {
     const titles = (mock: typeof mocks.send) =>
       mock.mock.calls.map(([message]) => message.embeds[0].toJSON().title);
     expect(titles(mocks.send)).toEqual(["야있날 게시 지연 · 자동 복구 중", "야있날 지연 게시 완료"]);
-    expect(titles(mocks.alertsSend)).toEqual(["야있날 운영자 확인 필요", "야있날 게시 중단", "야있날 게시 재개"]);
+    expect(titles(mocks.alertsSend)).toEqual([
+      "야있날 운영자 확인 필요",
+      "야있날 게시 중단",
+      "야있날 게시 재개",
+      "야있날 게시 중단 종료 · 새 예정 없음",
+    ]);
     expect(mocks.digestSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes a problem by editing its first message, across a restart, instead of posting again", async () => {
+    for (const mock of [mocks.send, mocks.alertsSend, mocks.fetchMessage]) mock.mockClear();
+    const edit = vi.fn();
+    const original = (alert_level: string) => ({
+      embeds: buildInstagramMessage(normalizeInstagramEvent({ ...watchdogPayload, alert_level })!).embeds,
+      edit,
+    });
+    const deliver = async (alert_level: string, source_key: string, handle = handleInstagramEvent) =>
+      handle(normalizeInstagramEvent({ ...watchdogPayload, alert_level, source_key, error_message: `${alert_level} 문구` })!);
+
+    // 지연 → 지연 게시 완료: 로그 채널의 지연 메시지를 고친다.
+    await deliver("delay", "one:late");
+    mocks.fetchMessage.mockResolvedValueOnce(original("delay"));
+    expect(await deliver("recovered", "one:late")).toBe(true);
+    // 중단 → (봇 재시작) → 재개: 조치 채널의 중단 메시지를 고치고 멘션을 지운다.
+    await deliver("outage", "one:outage");
+    vi.resetModules();
+    const restarted = (await import("./instagram-handler.js")).handleInstagramEvent;
+    mocks.fetchMessage.mockResolvedValueOnce(original("outage"));
+    expect(await deliver("outage_resolved", "one:outage", restarted)).toBe(true);
+
+    expect([mocks.send.mock.calls.length, mocks.alertsSend.mock.calls.length]).toEqual([1, 1]);
+    const sentIds = await Promise.all(
+      [mocks.send, mocks.alertsSend].map(async (mock) => (await mock.mock.results[0]!.value).id),
+    );
+    expect(mocks.fetchMessage.mock.calls.map(([id]) => id)).toEqual(sentIds);
+    const edits = edit.mock.calls.map(([message]) => ({ content: message.content, ...message.embeds[0].toJSON() }));
+    expect(edits).toMatchObject([
+      { content: null, title: "야있날 지연 게시 완료", color: 0x57f287, description: watchdogPayload.error_message },
+      { content: null, title: "야있날 게시 재개", color: 0x57f287, description: watchdogPayload.error_message },
+    ]);
+    expect(edits.map((embed) => embed.fields.at(-1))).toMatchObject([
+      { name: "닫힘", value: expect.stringContaining("recovered 문구") },
+      { name: "닫힘", value: expect.stringContaining("outage_resolved 문구") },
+    ]);
+
+    // 닫힌 문제는 기록에서 빠진다. 같은 키의 다음 닫는 알림은 새 메시지로 간다.
+    mocks.fetchMessage.mockClear();
+    expect(await deliver("outage_closed", "one:outage", restarted)).toBe(true);
+    expect([mocks.fetchMessage.mock.calls.length, mocks.alertsSend.mock.calls.length]).toEqual([0, 2]);
+  });
+
+  it("posts the closing alert as a new message when the first one is gone", async () => {
+    for (const mock of [mocks.send, mocks.fetchMessage]) mock.mockClear();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deliver = (alert_level: string) =>
+      handleInstagramEvent(normalizeInstagramEvent({ ...watchdogPayload, alert_level, source_key: "gone:late" })!);
+    await deliver("delay");
+    mocks.fetchMessage.mockRejectedValueOnce(new Error("Unknown Message"));
+    expect(await deliver("recovered")).toBe(true);
+    expect(mocks.send).toHaveBeenCalledTimes(2);
+    vi.restoreAllMocks();
   });
 
   it("delivers each alert level of the same job once", async () => {
@@ -385,6 +455,7 @@ describe("watchdog alert levels", () => {
     ["action", 0xed4245, "야있날 운영자 확인 필요", false, true],
     ["outage", 0xed4245, "야있날 게시 중단", false, true],
     ["outage_resolved", 0x57f287, "야있날 게시 재개", false, false],
+    ["outage_closed", 0x95a5a6, "야있날 게시 중단 종료 · 새 예정 없음", true, false],
   ] as const)("applies the %s display policy", (alert_level, color, title, silent, mention) => {
     const event = normalizeInstagramEvent({ ...watchdogPayload, alert_level });
     if (!event || event.status !== "failed") throw new Error("expected failure event");

@@ -6,8 +6,14 @@ import {
   type MessageCreateOptions,
   MessageFlags,
 } from "discord.js";
-import { fetchAlertsChannel, fetchDigestChannel, fetchInstagramChannel } from "../discord/alerts.js";
+import {
+  fetchAlertsChannel,
+  fetchDigestChannel,
+  fetchInstagramChannel,
+  fetchTextChannel,
+} from "../discord/alerts.js";
 import { env } from "../env.js";
+import { getProblemMessage, setProblemMessage, type ProblemMessage } from "./instagram-problems.js";
 
 const ACCOUNTS = {
   jakkuyagu: {
@@ -45,10 +51,18 @@ const ALERT_LEVELS = {
   action: { color: 0xed4245, title: "운영자 확인 필요", silent: false, mention: true },
   outage: { color: 0xed4245, title: "게시 중단", silent: false, mention: true },
   outage_resolved: { color: 0x57f287, title: "게시 재개", silent: false, mention: false },
+  outage_closed: { color: 0x95a5a6, title: "게시 중단 종료 · 새 예정 없음", silent: true, mention: false },
 } as const;
 
 type AlertLevel = keyof typeof ALERT_LEVELS;
-const ACTION_CHANNEL_LEVELS: ReadonlySet<AlertLevel> = new Set(["action", "outage", "outage_resolved"]);
+const ACTION_CHANNEL_LEVELS: ReadonlySet<AlertLevel> = new Set([
+  "action",
+  "outage",
+  "outage_resolved",
+  "outage_closed",
+]);
+// 문제를 닫는 수준. 같은 문제로 먼저 올린 메시지가 있으면 새로 보내지 않고 그 메시지를 고친다.
+const CLOSING_LEVELS: ReadonlySet<AlertLevel> = new Set(["recovered", "outage_resolved", "outage_closed"]);
 
 export interface InstagramPostEvent {
   status: "published";
@@ -369,19 +383,60 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
   if (delivered.has(dedupeKey)) return false;
 
   // 사람이 움직여야 하는 알림만 조치 채널로, 요약은 요약 채널로 보낸다. 나머지는 게시 로그 채널에 남긴다.
-  const channel =
-    event.status === "digest"
-      ? await fetchDigestChannel()
-      : event.status === "failed" && event.alertLevel && ACTION_CHANNEL_LEVELS.has(event.alertLevel)
-        ? await fetchAlertsChannel()
-        : await fetchInstagramChannel();
-  if (!channel) throw new Error("Instagram Discord channel unavailable");
-  await channel.send(buildInstagramMessage(event));
+  // 워치독은 한 문제의 시작과 끝에 같은 sourceKey를 쓴다. 문제 하나에 메시지 하나를 지킨다.
+  const level = event.status === "failed" ? event.alertLevel : undefined;
+  const problemKey =
+    event.status === "failed" && level && event.sourceKey ? `${event.account}:${event.sourceKey}` : null;
+  const closing = !!level && CLOSING_LEVELS.has(level);
+  const prior = problemKey ? getProblemMessage(problemKey) : undefined;
+  const edited =
+    event.status === "failed" && level && closing && prior
+      ? await closeProblemMessage(prior, event, level)
+      : false;
+  if (!edited) {
+    const channel =
+      event.status === "digest"
+        ? await fetchDigestChannel()
+        : level && ACTION_CHANNEL_LEVELS.has(level)
+          ? await fetchAlertsChannel()
+          : await fetchInstagramChannel();
+    if (!channel) throw new Error("Instagram Discord channel unavailable");
+    const sent = await channel.send(buildInstagramMessage(event));
+    if (problemKey && !closing) {
+      setProblemMessage(problemKey, { channelId: sent.channelId, messageId: sent.id, at: now });
+    }
+  }
+  if (problemKey && closing && prior) setProblemMessage(problemKey, null);
   delivered.set(dedupeKey, {
     timestamp: now,
     ttl: event.status === "published" ? SUCCESS_DEDUPE_MS : FAILURE_DEDUPE_MS,
   });
   return true;
+}
+
+/** 먼저 올린 메시지를 닫힌 상태로 고친다. 고치지 못하면(메시지 삭제 등) false — 호출자가 새로 보낸다. */
+async function closeProblemMessage(
+  prior: ProblemMessage,
+  event: InstagramFailureEvent,
+  level: AlertLevel,
+): Promise<boolean> {
+  try {
+    const channel = await fetchTextChannel(prior.channelId, "instagram-problem");
+    if (!channel) return false;
+    const message = await channel.messages.fetch(prior.messageId);
+    const alert = ALERT_LEVELS[level];
+    const closedAt = Math.floor(Date.parse(event.occurredAt) / 1000);
+    const embed = EmbedBuilder.from(message.embeds[0])
+      .setColor(alert.color)
+      .setTitle(`${ACCOUNTS[event.account].displayName} ${alert.title}`)
+      .addFields({ name: "닫힘", value: `<t:${closedAt}:f> · ${truncate(event.errorMessage, 900)}` });
+    // 수정은 푸시를 만들지 않는다. 처음 알림의 멘션은 지운다.
+    await message.edit({ content: null, embeds: [embed] });
+    return true;
+  } catch (err) {
+    console.warn("[instagram] problem message edit failed — sending a new one:", err);
+    return false;
+  }
 }
 
 function boundedString(value: unknown, max: number, allowEmpty: boolean): string | null {

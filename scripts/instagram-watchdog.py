@@ -191,7 +191,11 @@ def _run_recovery(
 
 
 # 단계별 알림 수준. 봇이 이 값으로 색·무음·멘션을 정한다(docs/alerts.md). 표에 없는 단계는 action.
-ALERT_LEVEL_BY_STAGE = {"initial": "delay", "final_published": "recovered"}
+ALERT_LEVEL_BY_STAGE = {
+    "initial": "delay",
+    "final_published": "recovered",
+    "resolved_published": "recovered",
+}
 OUTAGE_STREAK = 3
 OUTAGE_STALE_AFTER = timedelta(days=3)
 
@@ -276,6 +280,15 @@ def _alert_once(
     ):
         stage = "reminder_24h"
         alert_message = f"복구 24시간 경과 — {message}"
+    if (
+        stage is None
+        and status == "published"
+        and ledger.alert_time(key, "final_operator_required") is not None
+        and ledger.alert_time(key, "resolved_published") is None
+    ):
+        # 확인 필요로 넘긴 뒤 게시됐다(수동 조치·뒤늦은 복구). 봇이 그 알림을 닫도록 알린다.
+        stage = "resolved_published"
+        alert_message = f"확인 필요 건 게시 완료 — {message}"
     if stage is None:
         return
     print(f"경고 발송: {key} [{stage}] — {alert_message}")
@@ -304,9 +317,14 @@ def _job_needs_alert_check(ledger: ReliabilityLedger, item: dict) -> bool:
         return True
     if status not in {"published", "cancelled"} or item.get("policy_cancelled"):
         return False
+    job_id = item["job_id"]
+    if ledger.alert_time(job_id, "initial") and not ledger.has_final_alert(job_id):
+        return True
+    # 확인 필요로 넘긴 뒤 게시된 건은 그 알림을 닫아야 한다.
     return bool(
-        ledger.alert_time(item["job_id"], "initial")
-        and not ledger.has_final_alert(item["job_id"])
+        status == "published"
+        and ledger.alert_time(job_id, "final_operator_required")
+        and ledger.alert_time(job_id, "resolved_published") is None
     )
 
 
@@ -1016,8 +1034,12 @@ def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) 
         opened = open_outages.get(name)
         if streak and now - newest > OUTAGE_STALE_AFTER:
             # 새 예정이 며칠째 없으면(시즌 종료·휴식기) 지난 미게시는 지금의 중단이 아니다.
-            if open_outages.pop(name, None):
+            # 푸시 없이 닫되, 봇이 처음 올린 경보 메시지를 닫힌 상태로 고치도록 알린다.
+            if opened:
+                message = f"{name} 새 예정이 {OUTAGE_STALE_AFTER.days}일 넘게 없어 닫음 — 중단 감지 {opened['since']}"
                 print(f"게시 중단 종료(새 예정 없음): {name}")
+                if _notify(account, content_type, f"outage:{name}:{opened['since']}", message, "outage_closed"):
+                    del open_outages[name]
             continue
         if streak >= OUTAGE_STREAK and not opened:
             started = now.isoformat(timespec="minutes")
