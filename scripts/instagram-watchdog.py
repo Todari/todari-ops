@@ -1241,6 +1241,10 @@ def main(argv: list[str] | None = None) -> None:
         daily_publish_digest_once(state, now, ledger)
     except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
         print(f"warning: 일일 게시 실적 실패 — {type(error).__name__}: {error}")
+    # 봇의 /healthz가 이 신호의 신선도를 본다. 크론이 멈추면 외부 감시가 알린다.
+    sent, detail = _post_signed_payload(HOME / "jujinmo" / ".env", {"status": "heartbeat"})
+    if not sent:
+        print(f"warning: 생존 신호 전송 실패 — {detail}")
     _save_state(state)
     ledger.close()
 

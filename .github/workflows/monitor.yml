@@ -1,0 +1,31 @@
+name: monitor
+
+# 봇이나 인스타 워치독이 멈추면 봇 스스로는 알릴 수 없다. 봇 밖에서 /healthz를 보고
+# 배포 알림용 웹훅으로 알린다. /healthz는 Discord 연결, 내부 점검, 워치독 생존 신호의 신선도를 본다.
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  healthz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check bot and watchdog health
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+        run: |
+          for attempt in 1 2 3; do
+            code=$(curl -s -o healthz.json -w '%{http_code}' --max-time 20 https://alerts.todari.dev/healthz || true)
+            [ "$code" = "200" ] && exit 0
+            sleep 40
+          done
+          stale=$(jq -r '[.checks | to_entries[] | select(.value.status != "healthy") | "\(.key)=\(.value.status)"] | join(", ")' healthz.json 2>/dev/null || true)
+          MSG="@everyone 🔴 todari-ops 상태 확인 실패 (HTTP ${code:-없음}) — ${stale:-봇이 응답하지 않습니다}. 봇 또는 인스타 워치독이 멈췄을 수 있습니다."
+          [ -z "$WEBHOOK" ] && { echo "$MSG"; exit 1; }
+          curl -sS -H "Content-Type: application/json" \
+            -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:["everyone"]}}')" "$WEBHOOK" >/dev/null || true
+          exit 1

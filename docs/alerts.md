@@ -44,3 +44,8 @@
 
 워치독은 main 푸시로 배포되지 않는다. 커밋한 뒤 `deploy/install-instagram-watchdog.sh`로 EC2에 따로 설치한다.
 작업 트리의 파일을 그대로 복사하므로 커밋본에서 실행한다.
+
+## 생존 감시
+
+- 워치독은 실행마다 봇에 생존 신호(`status: "heartbeat"`)를 보낸다. 봇의 `/healthz`는 이 신호가 30분 넘게 끊기면 `instagram-watchdog=stale`로 응답한다.
+- `.github/workflows/monitor.yml`이 30분마다 `/healthz`를 본다. 실패하면 배포 알림 웹훅으로 `@everyone` 멘션과 함께 알린다. 봇이 죽어도 이 경로는 살아 있다.

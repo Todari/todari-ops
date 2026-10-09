@@ -292,9 +292,11 @@ function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions
     .setDescription(event.errorMessage)
     .setTimestamp(new Date(event.occurredAt))
     .setFooter({
-      text: event.nextRetryAt
-        ? "Instagram 자동 게시 오류 · 원인 기록 후 자동 재시도"
-        : "Instagram 자동 게시 오류 · 같은 오류는 6시간 동안 생략",
+      text: alert
+        ? "Instagram 게시 감시"
+        : event.nextRetryAt
+          ? "Instagram 자동 게시 오류 · 원인 기록 후 자동 재시도"
+          : "Instagram 자동 게시 오류 · 같은 오류는 6시간 동안 생략",
     })
     .addFields({ name: "오류 종류", value: event.errorType, inline: true });
 

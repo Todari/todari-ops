@@ -14,7 +14,17 @@ import { isDiscordConnected, runtimeHealth } from "../monitor/health.js";
 
 const MAX_BODY_BYTES = 1_000_000;
 
+// 인스타 워치독(EC2 크론 15분)이 실행마다 보내는 생존 신호의 점검 이름.
+const WATCHDOG_CHECK = "instagram-watchdog";
+const WATCHDOG_INTERVAL_MS = 15 * 60_000;
+
 export function startWebhookServer(): ReturnType<typeof createServer> {
+  if (env.INSTAGRAM_WEBHOOK_SECRET) {
+    // 워치독이 멈추면 /healthz가 stale이 되어 외부 감시(.github/workflows/monitor.yml)가 알린다.
+    // 재배포 직후 오탐을 막으려고 시작 시각을 첫 신호로 친다.
+    runtimeHealth.expectCheck(WATCHDOG_CHECK, WATCHDOG_INTERVAL_MS);
+    runtimeHealth.completeCheck(WATCHDOG_CHECK);
+  }
   if (!env.WEBHOOK_ENABLED) {
     console.log("[webhook] inbound routes disabled; serving /healthz only");
   }
@@ -108,6 +118,11 @@ async function handleInstagramWebhook(
   }
   const payload = parseJson(body, res);
   if (payload === undefined) return;
+  if ((payload as { status?: unknown } | null)?.status === "heartbeat") {
+    runtimeHealth.completeCheck(WATCHDOG_CHECK);
+    writeJson(res, 200, { ok: true });
+    return;
+  }
   const event = normalizeInstagramEvent(payload);
   if (!event) {
     writeJson(res, 400, { error: "invalid shape" });
