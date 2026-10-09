@@ -3,6 +3,7 @@ import { env } from "../env.js";
 import { findProject, projects, repoFullName } from "../projects.js";
 import { fetchDigestChannel } from "../discord/alerts.js";
 import { formatUptimeSnapshot, getUptimeSnapshot } from "../monitor/uptime.js";
+import { getInstagramBrief } from "../monitor/status-board.js";
 import { captureException } from "../observability/sentry.js";
 import { putPendingAction } from "../webhook/pending.js";
 import { ghJson } from "../github/api.js";
@@ -161,6 +162,9 @@ export async function postDigest(): Promise<boolean> {
       value: formatUptimeSnapshot(uptime),
     });
   }
+
+  const instagram = getInstagramBrief();
+  if (instagram) embed.addFields({ name: "📸 인스타 게시", value: instagram });
 
   const components = vault ? buildTaskButtons(vault) : [];
   await channel.send({ embeds: [embed], components });

@@ -297,7 +297,7 @@ class InstagramWatchdogTest(unittest.TestCase):
         self.assertEqual(state["_publish_outage"], {})
         self.assertEqual(
             watchdog.build_daily_publish_lines([], [], {"jujinmo close_explainer": {"streak": 3}})[-1],
-            "게시 중단 중: jujinmo close_explainer(연속 3건)",
+            "게시 중단 중: 주진모 close_explainer(연속 3건)",
         )
 
     def test_status_board_groups_each_account_by_kst_day_with_open_problems(self):
@@ -331,7 +331,7 @@ class InstagramWatchdogTest(unittest.TestCase):
             "└ 지연 1건",
         ])
 
-    def test_daily_publish_digest_reports_yesterday_once_after_nine(self):
+    def test_daily_brief_reports_yesterday_and_week_by_account(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
             jobs = [
@@ -346,22 +346,21 @@ class InstagramWatchdogTest(unittest.TestCase):
                     expected_at=expected, due_at=expected + timedelta(hours=1), published=published,
                     now=expected + timedelta(hours=2),
                 )
-            state: dict = {}
-            with patch.object(watchdog, "_notify_digest", return_value=True) as notify:
-                watchdog.daily_publish_digest_once(state, datetime(2026, 10, 8, 8, 59, tzinfo=KST), ledger)
-                notify.assert_not_called()
-                watchdog.daily_publish_digest_once(state, datetime(2026, 10, 8, 9, 7, tzinfo=KST), ledger)
-                watchdog.daily_publish_digest_once(state, datetime(2026, 10, 8, 9, 22, tzinfo=KST), ledger)
+            brief = watchdog.build_daily_brief(
+                datetime(2026, 10, 8, 8, 22, tzinfo=KST), ledger, {"jakkuyagu game-flow-reel": {"streak": 3}}
+            )
+            quiet = watchdog.build_daily_brief(datetime(2026, 11, 8, 8, 22, tzinfo=KST), ledger)
             ledger.close()
 
-        notify.assert_called_once_with(
-            "인스타 게시 실적 · 2026-10-07",
+        self.assertEqual(
+            brief,
             "어제 게시: 1/3건\n"
-            "· gonggu gonggu-daily 1/1\n"
-            "· jakkuyagu game-flow-reel 0/2 ← 미게시 있음\n"
-            "최근 7일: gonggu 1/1 · jakkuyagu 1/3",
+            "· 공구함 gonggu-daily 1/1\n"
+            "· 야있날 game-flow-reel 0/2 ← 미게시 있음\n"
+            "최근 7일: 공구함 1/1 · 야있날 1/3\n"
+            "게시 중단 중: 야있날 game-flow-reel(연속 3건)",
         )
-        self.assertEqual(state["_instagram_daily_publish_digest"], "2026-10-08")
+        self.assertEqual(quiet, "")  # 최근 7일에 예정이 없으면 싣지 않는다.
 
     def test_weekly_digest_starts_with_reliability_summary(self):
         lines = watchdog.build_weekly_digest_lines(

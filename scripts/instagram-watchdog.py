@@ -1058,6 +1058,12 @@ def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) 
             opened["streak"] = streak
 
 
+def _label(name: str) -> str:
+    """'jakkuyagu' 또는 'jakkuyagu game-flow-reel'의 계정 부분을 표시 이름으로 바꾼다."""
+    account, _, rest = name.partition(" ")
+    return (ACCOUNT_LABELS.get(account, account) + " " + rest).rstrip()
+
+
 def build_status_board(now: datetime, ledger: ReliabilityLedger, outages: dict | None = None) -> str:
     """#상태판에 실을 계정별 현황. 계정마다 한 줄, 봐야 할 것이 있으면 그 아래 한 줄."""
     today = now.astimezone(KST).date().isoformat()
@@ -1115,7 +1121,8 @@ def build_daily_publish_lines(
         f"어제 게시: {sum(row[2] for row in yesterday)}/{sum(row[3] for row in yesterday)}건"
     ]
     lines.extend(
-        f"· {account} {content_type} {published}/{total}" + ("" if published == total else " ← 미게시 있음")
+        f"· {_label(account)} {content_type} {published}/{total}"
+        + ("" if published == total else " ← 미게시 있음")
         for account, content_type, published, total in yesterday
     )
     totals: dict[str, list[int]] = {}
@@ -1124,34 +1131,30 @@ def build_daily_publish_lines(
         pair[0] += published
         pair[1] += total
     lines.append(
-        "최근 7일: " + " · ".join(f"{account} {done}/{total}" for account, (done, total) in totals.items())
+        "최근 7일: "
+        + " · ".join(f"{_label(account)} {done}/{total}" for account, (done, total) in totals.items())
     )
     if outages:
         lines.append(
             "게시 중단 중: "
-            + " · ".join(f"{name}(연속 {item['streak']}건)" for name, item in outages.items())
+            + " · ".join(f"{_label(name)}(연속 {item['streak']}건)" for name, item in outages.items())
         )
     return lines
 
 
-def daily_publish_digest_once(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
-    """매일 9시 이후 한 번, 어제 예정 대비 게시 건수를 디스코드로 보낸다.
+def build_daily_brief(now: datetime, ledger: ReliabilityLedger, outages: dict | None = None) -> str:
+    """봇의 아침 다이제스트에 실을 어제 게시 실적. 최근 7일에 예정이 없으면 빈 문자열.
 
     건별 지연 알림만으로는 며칠째 거의 게시되지 않는 상태가 한눈에 보이지 않는다.
     """
-    today = now.date()
-    if now.hour < 9 or state.get("_instagram_daily_publish_digest") == today.isoformat():
-        return
+    today = now.astimezone(KST).date()
     yesterday = (today - timedelta(days=1)).isoformat()
     week = ledger.publish_counts((today - timedelta(days=7)).isoformat(), yesterday)
     if not week:
-        return
-    lines = build_daily_publish_lines(
-        ledger.publish_counts(yesterday, yesterday), week, state.get("_publish_outage")
+        return ""
+    return "\n".join(
+        build_daily_publish_lines(ledger.publish_counts(yesterday, yesterday), week, outages)
     )
-    if _notify_digest(f"인스타 게시 실적 · {yesterday}", "\n".join(lines)):
-        state["_instagram_daily_publish_digest"] = today.isoformat()
-        print(f"일일 게시 실적 발송: {yesterday}")
 
 
 def build_weekly_digest_lines(
@@ -1307,14 +1310,11 @@ def main(argv: list[str] | None = None) -> None:
         check_publish_outage(state, now, ledger)
     except Exception as error:  # noqa: BLE001 - 중단 경보 실패가 감시를 막지 않는다
         print(f"warning: 게시 중단 검사 실패 — {type(error).__name__}: {error}")
-    try:
-        daily_publish_digest_once(state, now, ledger)
-    except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
-        print(f"warning: 일일 게시 실적 실패 — {type(error).__name__}: {error}")
     # 봇의 /healthz가 이 신호의 신선도를 본다. 크론이 멈추면 외부 감시가 알린다.
     heartbeat = {"status": "heartbeat"}
     try:
         heartbeat["board"] = build_status_board(now, ledger, state.get("_publish_outage"))
+        heartbeat["brief"] = build_daily_brief(now, ledger, state.get("_publish_outage"))
     except Exception as error:  # noqa: BLE001 - 상태판 실패가 생존 신호를 막지 않는다
         print(f"warning: 상태판 현황 실패 — {type(error).__name__}: {error}")
     sent, detail = _post_signed_payload(HOME / "jujinmo" / ".env", heartbeat)
