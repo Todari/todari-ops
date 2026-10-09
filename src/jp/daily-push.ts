@@ -2,7 +2,7 @@ import { Client, EmbedBuilder } from "discord.js";
 import { env } from "../env.js";
 import { generateDailyPhrase } from "./tutor.js";
 import { insertCard, logDaily, recentDailyFronts } from "./cards.js";
-import { fetchJpChannel } from "../discord/alerts.js";
+import { fetchJpChannel, ownerMention } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 
@@ -55,7 +55,8 @@ export async function runJpPush(_client: Client): Promise<void> {
       `**${phrase.reading}**\n${phrase.meaning}\n\n> ${phrase.example}\n> ${phrase.exampleKo}` +
         (phrase.note ? `\n\n💡 ${phrase.note}` : ""),
     );
-  await channel.send({ embeds: [embed] });
+  // 매일의 학습 알림이라 푸시가 가야 한다(서버 알림 기본값이 "@멘션만").
+  await channel.send({ ...ownerMention(), embeds: [embed] });
 }
 
 // KST is fixed UTC+9 (no DST) — compute next HH:MM occurrence. Mirrors

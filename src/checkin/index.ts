@@ -10,7 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
-import { fetchDigestChannel } from "../discord/alerts.js";
+import { fetchDigestChannel, ownerMention } from "../discord/alerts.js";
 import { todayKst } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
@@ -60,8 +60,11 @@ export async function postCheckinPrompt(): Promise<boolean> {
       .setLabel("📝 회고 쓰기 (30초)")
       .setStyle(ButtonStyle.Primary),
   );
+  // 회고를 쓰라는 요청이라 푸시가 가야 한다(서버 알림 기본값이 "@멘션만").
+  const mention = ownerMention();
   await channel.send({
-    content: "🌙 **저녁 체크인** — 오늘을 3줄로 닫읍시다. 내일 첫 작업은 아침 브리핑 맨 위에 올라갑니다.",
+    ...mention,
+    content: `${mention.content} 🌙 **저녁 체크인** — 오늘을 3줄로 닫읍시다. 내일 첫 작업은 아침 브리핑 맨 위에 올라갑니다.`,
     components: [row],
   });
   return true;

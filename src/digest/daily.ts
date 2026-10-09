@@ -1,7 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from "discord.js";
 import { env } from "../env.js";
 import { findProject, projects, repoFullName } from "../projects.js";
-import { fetchDigestChannel } from "../discord/alerts.js";
+import { fetchDigestChannel, ownerMention } from "../discord/alerts.js";
 import { formatUptimeSnapshot, getUptimeSnapshot } from "../monitor/uptime.js";
 import { getInstagramBrief } from "../monitor/status-board.js";
 import { captureException } from "../observability/sentry.js";
@@ -167,7 +167,8 @@ export async function postDigest(): Promise<boolean> {
   if (instagram) embed.addFields({ name: "📸 인스타 게시", value: instagram });
 
   const components = vault ? buildTaskButtons(vault) : [];
-  await channel.send({ embeds: [embed], components });
+  // 아침 브리프는 하루 한 번 푸시로 도착을 알린다(서버 알림 기본값이 "@멘션만").
+  await channel.send({ ...ownerMention(), embeds: [embed], components });
   void updateDailyTopic();
   return true;
 }

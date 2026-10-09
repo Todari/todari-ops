@@ -15,6 +15,7 @@ vi.mock("../env.js", () => ({ env: mocks.env }));
 vi.mock("../discord/alerts.js", () => ({
   fetchDigestChannel: async () => ({ send: mocks.send }),
   fetchJpChannel: async () => ({ send: mocks.send }),
+  ownerMention: () => ({ content: "<@owner>", allowedMentions: { users: ["owner"] } }),
 }));
 vi.mock("../observability/sentry.js", () => ({ captureException: vi.fn() }));
 vi.mock("../github/api.js", () => ({ ghJson: async () => null }));
