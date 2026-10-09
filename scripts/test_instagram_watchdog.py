@@ -189,6 +189,112 @@ class InstagramWatchdogTest(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertTrue(any("**09._.ham**" in line for line in lines))
 
+    def test_recovery_picks_least_attempted_job_so_a_stuck_one_cannot_block_the_rest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            due = datetime(2026, 10, 7, 23, tzinfo=KST)
+            for name in ("stuck", "fresh"):
+                ledger.sync(
+                    job_id=f"jakkuyagu:flow-reel:{name}", account="jakkuyagu", content_type="game-flow-reel",
+                    source_key=name, expected_at=due - timedelta(hours=1), due_at=due,
+                    published=False, now=due + timedelta(minutes=5),
+                )
+            ledger.connection.execute(
+                "UPDATE jobs SET recovery_attempts=10 WHERE job_id='jakkuyagu:flow-reel:stuck'"
+            )
+            jobs = [("jakkuyagu:flow-reel:stuck", "2026-10-07", "stuck"), ("jakkuyagu:flow-reel:fresh", "2026-10-07", "fresh")]
+            picked = watchdog._next_recovery_job(ledger, jobs)
+            none = watchdog._next_recovery_job(ledger, [])
+            ledger.close()
+
+        self.assertEqual(picked[2], "fresh")
+        self.assertIsNone(none)
+
+    def test_watchdog_payload_carries_alert_level_per_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            due = datetime(2026, 10, 7, 23, tzinfo=KST)
+            sent: list[dict] = []
+
+            def capture(_env_path, payload):
+                sent.append(payload)
+                return True, "ok"
+
+            def sync(published: bool, now: datetime) -> None:
+                ledger.sync(
+                    job_id="jakkuyagu:flow-reel:a", account="jakkuyagu", content_type="game-flow-reel",
+                    source_key="a", expected_at=due - timedelta(hours=1), due_at=due,
+                    published=published, now=now,
+                )
+
+            with patch.object(watchdog, "_post_signed_payload", side_effect=capture):
+                sync(False, due + timedelta(minutes=5))
+                watchdog._alert_once({}, ledger, "jakkuyagu:flow-reel:a", "jakkuyagu", "game-flow-reel", "릴스", now=due + timedelta(minutes=5))
+                sync(True, due + timedelta(hours=1))
+                watchdog._alert_once({}, ledger, "jakkuyagu:flow-reel:a", "jakkuyagu", "game-flow-reel", "릴스", now=due + timedelta(hours=1))
+                watchdog._notify("gonggu", "gonggu-daily", "k", "확인 필요")
+            ledger.close()
+
+        self.assertEqual([p["alert_level"] for p in sent], ["delay", "recovered", "action"])
+        self.assertEqual({p["source_key"] for p in sent[:2]}, {"jakkuyagu:flow-reel:a"})
+
+    def test_publish_outage_opens_once_at_three_misses_and_closes_on_publish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            base = datetime(2026, 10, 5, 15, 40, tzinfo=KST)
+
+            def job(day: int, content_type: str, published: bool) -> None:
+                due = base + timedelta(days=day)
+                ledger.sync(
+                    job_id=f"jujinmo:{content_type}:{day}", account="jujinmo", content_type=content_type,
+                    source_key=str(day), expected_at=due - timedelta(hours=1), due_at=due,
+                    published=published, now=due + timedelta(hours=1),
+                )
+
+            job(0, "close_explainer", True)
+            job(1, "close_explainer", False)
+            job(2, "close_explainer", False)
+            job(2, "market_term_explainer", True)  # 다른 유형의 게시가 연속을 끊지 않는다.
+            state: dict = {}
+            sent: list[dict] = []
+            results = iter([True, False, True, True])
+
+            def capture(_env_path, payload):
+                ok = next(results)
+                if ok:
+                    sent.append(payload)
+                return ok, "ok" if ok else "down"
+
+            with patch.object(watchdog, "_post_signed_payload", side_effect=capture):
+                now = base + timedelta(days=2, hours=2)
+                watchdog.check_publish_outage(state, now, ledger)
+                self.assertEqual(sent, [])  # 2건 연속은 아직 경보가 아니다.
+                job(3, "close_explainer", False)
+                now = base + timedelta(days=3, hours=2)
+                watchdog.check_publish_outage(state, now, ledger)
+                watchdog.check_publish_outage(state, now, ledger)  # 열려 있는 동안 다시 보내지 않는다.
+                self.assertEqual(len(sent), 1)
+                # 새 예정이 사흘 넘게 없으면 알림 없이 닫고, 다시 열지도 않는다.
+                stale = dict(state["_publish_outage"])
+                watchdog.check_publish_outage(state, now + timedelta(days=4), ledger)
+                self.assertEqual((state["_publish_outage"], len(sent)), ({}, 1))
+                state["_publish_outage"] = stale
+                job(4, "close_explainer", True)
+                now = base + timedelta(days=4, hours=2)
+                watchdog.check_publish_outage(state, now, ledger)  # 전송 실패: 상태를 남겨 다시 시도한다.
+                self.assertIn("jujinmo close_explainer", state["_publish_outage"])
+                watchdog.check_publish_outage(state, now, ledger)
+            ledger.close()
+
+        self.assertEqual([p["alert_level"] for p in sent], ["outage", "outage_resolved"])
+        self.assertEqual(sent[0]["error_message"], "jujinmo close_explainer 최근 3건 연속 미게시 — 마지막 게시 2026-10-05")
+        self.assertEqual(sent[0]["source_key"], sent[1]["source_key"])
+        self.assertEqual(state["_publish_outage"], {})
+        self.assertEqual(
+            watchdog.build_daily_publish_lines([], [], {"jujinmo close_explainer": {"streak": 3}})[-1],
+            "게시 중단 중: jujinmo close_explainer(연속 3건)",
+        )
+
     def test_daily_publish_digest_reports_yesterday_once_after_nine(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")

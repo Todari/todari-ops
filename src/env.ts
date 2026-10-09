@@ -35,6 +35,7 @@ export const env = {
   UPTIME_INTERVAL_MS: Number(process.env.UPTIME_INTERVAL_MS ?? 300_000),
   RESOURCE_INTERVAL_MS: Number(process.env.RESOURCE_INTERVAL_MS ?? 300_000),
   DIGEST_CHANNEL_ID: process.env.DIGEST_CHANNEL_ID ?? "",
+  DEPLOY_LOG_CHANNEL_ID: process.env.DEPLOY_LOG_CHANNEL_ID ?? "",
   DIGEST_TIME: process.env.DIGEST_TIME ?? "08:30", // KST HH:MM, empty = disabled
   DIAG_DAILY_CAP: Number(process.env.DIAG_DAILY_CAP ?? 3), // 0 = auto-diagnosis off
   // 명시한 경우 모델을 고정한다. 미설정이면 작업별 모델 정책을 적용한다.

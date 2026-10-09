@@ -4,8 +4,10 @@ import {
   ButtonStyle,
   EmbedBuilder,
   type MessageCreateOptions,
+  MessageFlags,
 } from "discord.js";
-import { fetchInstagramChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, fetchDigestChannel, fetchInstagramChannel } from "../discord/alerts.js";
+import { env } from "../env.js";
 
 const ACCOUNTS = {
   jakkuyagu: {
@@ -35,6 +37,18 @@ const ACCOUNTS = {
 } as const;
 
 type Account = keyof typeof ACCOUNTS;
+
+// 워치독이 보내는 단계 알림(alert_level)의 표시 정책. 없는 실패 이벤트는 기존 표시 그대로다.
+const ALERT_LEVELS = {
+  delay: { color: 0xfee75c, title: "게시 지연 · 자동 복구 중", silent: true, mention: false },
+  recovered: { color: 0x57f287, title: "지연 게시 완료", silent: true, mention: false },
+  action: { color: 0xed4245, title: "운영자 확인 필요", silent: false, mention: true },
+  outage: { color: 0xed4245, title: "게시 중단", silent: false, mention: true },
+  outage_resolved: { color: 0x57f287, title: "게시 재개", silent: false, mention: false },
+} as const;
+
+type AlertLevel = keyof typeof ALERT_LEVELS;
+const ACTION_CHANNEL_LEVELS: ReadonlySet<AlertLevel> = new Set(["action", "outage", "outage_resolved"]);
 
 export interface InstagramPostEvent {
   status: "published";
@@ -70,6 +84,7 @@ export interface InstagramFailureEvent {
   attempt: number | null;
   nextRetryAt: string | null;
   occurredAt: string;
+  alertLevel?: AlertLevel;
 }
 
 export interface InstagramDigestEvent {
@@ -115,6 +130,11 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
     const failureCategory = optionalString(raw.failure_category, 120);
     const attempt = optionalPositiveInteger(raw.attempt);
     const nextRetryAt = optionalDate(raw.next_retry_at);
+    // 모르는 alert_level은 거절하지 않고 없는 것으로 취급해 기존 실패 알림으로 표시한다.
+    const alertLevel =
+      typeof raw.alert_level === "string" && Object.hasOwn(ALERT_LEVELS, raw.alert_level)
+        ? (raw.alert_level as AlertLevel)
+        : undefined;
     if (
       errorType === null ||
       errorMessage === null ||
@@ -139,6 +159,7 @@ export function normalizeInstagramEvent(payload: unknown): InstagramEvent | null
       attempt,
       nextRetryAt,
       occurredAt: new Date(occurredAt).toISOString(),
+      alertLevel,
     };
   }
   if (status !== "published") return null;
@@ -262,9 +283,10 @@ export function buildInstagramMessage(event: InstagramEvent): MessageCreateOptio
 
 function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions {
   const account = ACCOUNTS[event.account];
+  const alert = event.alertLevel ? ALERT_LEVELS[event.alertLevel] : null;
   const embed = new EmbedBuilder()
-    .setColor(0xed4245)
-    .setTitle(`${account.displayName} 자동 게시 실패`)
+    .setColor(alert?.color ?? 0xed4245)
+    .setTitle(`${account.displayName} ${alert?.title ?? "자동 게시 실패"}`)
     .setURL(account.profileUrl)
     .setAuthor({ name: `${account.displayName} ${account.handle}` })
     .setDescription(event.errorMessage)
@@ -307,7 +329,7 @@ function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions
     embed.addFields({ name: "대상", value: `\`${event.sourceKey}\`` });
   }
 
-  return {
+  const message: MessageCreateOptions = {
     embeds: [embed],
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -318,6 +340,12 @@ function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions
       ),
     ],
   };
+  if (alert?.silent) message.flags = MessageFlags.SuppressNotifications;
+  if (alert?.mention) {
+    message.content = `<@${env.OWNER_DISCORD_ID}>`;
+    message.allowedMentions = { users: [env.OWNER_DISCORD_ID] };
+  }
+  return message;
 }
 
 /** 같은 게시기의 네트워크 재시도는 한 번만 Discord에 표시한다. */
@@ -329,15 +357,22 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
   // 실패 키에 errorMessage를 넣지 않는다. 재시도마다 문구가 조금씩 달라지는
   // 같은 단계·원인의 실패(예: AI 검수 반복 거절)가 폭풍처럼 반복 표시되는 것을 막고,
   // 단계나 원인 분류가 바뀐 새 실패만 6시간 안에 다시 알린다.
+  // 워치독 알림은 stage·원인이 늘 같으므로 alertLevel까지 넣어 같은 job의 후속 단계를 살린다.
   const dedupeKey =
     event.status === "digest"
       ? `digest:${event.title}`
       : event.status === "published"
       ? `published:${event.account}:${event.mediaId}`
-      : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.stage ?? "unknown"}:${event.failureCategory ?? event.errorType}`;
+      : `failed:${event.account}:${event.sourceKey ?? "unknown"}:${event.stage ?? "unknown"}:${event.failureCategory ?? event.errorType}${event.alertLevel ? `:${event.alertLevel}` : ""}`;
   if (delivered.has(dedupeKey)) return false;
 
-  const channel = await fetchInstagramChannel();
+  // 사람이 움직여야 하는 알림만 조치 채널로, 요약은 요약 채널로 보낸다. 나머지는 게시 로그 채널에 남긴다.
+  const channel =
+    event.status === "digest"
+      ? await fetchDigestChannel()
+      : event.status === "failed" && event.alertLevel && ACTION_CHANNEL_LEVELS.has(event.alertLevel)
+        ? await fetchAlertsChannel()
+        : await fetchInstagramChannel();
   if (!channel) throw new Error("Instagram Discord channel unavailable");
   await channel.send(buildInstagramMessage(event));
   delivered.set(dedupeKey, {

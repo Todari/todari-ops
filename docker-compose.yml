@@ -22,8 +22,11 @@ services:
       # 일본어 학습 push 채널 (#일본어). 비밀 아님(서버 멤버에게 공개되는 채널 ID)이라
       # .env.production(EC2 전용, rsync 제외) 대신 여기 두어 배포로 함께 반영한다.
       - JP_CHANNEL_ID=1530151026974527569
-      # 야있날·섹터4 Instagram 게시 성공 알림 채널 (#instagram-bot)
+      # Instagram 게시 성공과 지연 감지·자동 복구 기록 채널 (#로그-게시).
+      # 운영자 확인 필요·게시 중단은 ALERTS(#조치-필요)로, 요약은 DIGEST(#daily)로 간다(docs/alerts.md).
       - INSTAGRAM_CHANNEL_ID=1539849876429475841
+      # PR 머지처럼 조치가 필요 없는 기록 채널 (#로그-배포)
+      - DEPLOY_LOG_CHANNEL_ID=1557911114484818061
       # 자연어 대화 채널(#토다리) — 여기 메시지는 의도 분류→라우팅
       - NL_CHANNEL_ID=1531185484985008128
     volumes:

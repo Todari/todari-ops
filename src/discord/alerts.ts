@@ -12,6 +12,12 @@ export async function fetchDigestChannel(): Promise<TextChannel | null> {
   return fetchTextChannel(id, "digest");
 }
 
+// PR 머지처럼 조치가 필요 없는 기록용 채널(#로그-배포). 없으면 alerts로 간다.
+export async function fetchDeployLogChannel(): Promise<TextChannel | null> {
+  const id = env.DEPLOY_LOG_CHANNEL_ID || env.ALERTS_CHANNEL_ID;
+  return fetchTextChannel(id, "deploy-log");
+}
+
 export async function fetchInboxChannel(): Promise<TextChannel | null> {
   const id = env.INBOX_CHANNEL_ID || env.ALERTS_CHANNEL_ID;
   return fetchTextChannel(id, "inbox");

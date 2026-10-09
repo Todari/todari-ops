@@ -1,5 +1,23 @@
-import { describe, expect, it } from "vitest";
-import { buildInstagramMessage, normalizeInstagramEvent } from "./instagram-handler.js";
+import { MessageFlags } from "discord.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  buildInstagramMessage,
+  handleInstagramEvent,
+  normalizeInstagramEvent,
+} from "./instagram-handler.js";
+
+const mocks = vi.hoisted(() => ({
+  env: { OWNER_DISCORD_ID: "owner" },
+  send: vi.fn(),
+  alertsSend: vi.fn(),
+  digestSend: vi.fn(),
+}));
+vi.mock("../env.js", () => ({ env: mocks.env }));
+vi.mock("../discord/alerts.js", () => ({
+  fetchInstagramChannel: async () => ({ send: mocks.send }),
+  fetchAlertsChannel: async () => ({ send: mocks.alertsSend }),
+  fetchDigestChannel: async () => ({ send: mocks.digestSend }),
+}));
 
 const validPayload = {
   account: "jakkuyagu",
@@ -305,4 +323,113 @@ describe("portfolio digest events", () => {
     expect(normalizeInstagramEvent({ status: "digest", title: "", body: "x" })).toBeNull();
     expect(normalizeInstagramEvent({ status: "digest", title: "t" })).toBeNull();
   });
+});
+
+describe("watchdog alert levels", () => {
+  // 워치독은 단계와 무관하게 같은 stage·failure_category를 보낸다.
+  const watchdogPayload = {
+    account: "jakkuyagu",
+    status: "failed",
+    error_type: "PublishWatchdog",
+    error_message: "프리뷰 게시가 예정 시각보다 25분 늦었습니다.",
+    content_type: "preview",
+    source_key: "2026-10-09:preview:game-1",
+    stage: "publish_watchdog",
+    failure_category: "watchdog",
+    occurred_at: "2026-10-09T17:55:00+09:00",
+  };
+
+  it("routes action levels to the alerts channel, digests to the digest channel, the rest to the log", async () => {
+    for (const mock of [mocks.send, mocks.alertsSend, mocks.digestSend]) mock.mockClear();
+    const deliver = (alert_level: string, source_key: string) =>
+      handleInstagramEvent(normalizeInstagramEvent({ ...watchdogPayload, alert_level, source_key })!);
+
+    for (const level of ["delay", "recovered", "action", "outage", "outage_resolved"]) {
+      expect(await deliver(level, `routing:${level}`)).toBe(true);
+    }
+    expect(
+      await handleInstagramEvent(
+        normalizeInstagramEvent({ status: "digest", title: "인스타 게시 실적 · routing", body: "어제 게시: 1/3건" })!,
+      ),
+    ).toBe(true);
+
+    const titles = (mock: typeof mocks.send) =>
+      mock.mock.calls.map(([message]) => message.embeds[0].toJSON().title);
+    expect(titles(mocks.send)).toEqual(["야있날 게시 지연 · 자동 복구 중", "야있날 지연 게시 완료"]);
+    expect(titles(mocks.alertsSend)).toEqual(["야있날 운영자 확인 필요", "야있날 게시 중단", "야있날 게시 재개"]);
+    expect(mocks.digestSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers each alert level of the same job once", async () => {
+    mocks.send.mockClear();
+    const deliver = (alert_level?: string) =>
+      handleInstagramEvent(normalizeInstagramEvent({ ...watchdogPayload, alert_level })!);
+
+    expect(await deliver("delay")).toBe(true);
+    expect(await deliver("delay")).toBe(false);
+    expect(await deliver("recovered")).toBe(true);
+    // alert_level이 없거나 모르는 값이면 기존 키 하나를 같이 쓴다.
+    expect(await deliver()).toBe(true);
+    expect(await deliver("urgent")).toBe(false);
+
+    expect(mocks.send.mock.calls.map(([message]) => message.embeds[0].toJSON().title)).toEqual([
+      "야있날 게시 지연 · 자동 복구 중",
+      "야있날 지연 게시 완료",
+      "야있날 자동 게시 실패",
+    ]);
+  });
+
+  it.each([
+    ["delay", 0xfee75c, "야있날 게시 지연 · 자동 복구 중", true, false],
+    ["recovered", 0x57f287, "야있날 지연 게시 완료", true, false],
+    ["action", 0xed4245, "야있날 운영자 확인 필요", false, true],
+    ["outage", 0xed4245, "야있날 게시 중단", false, true],
+    ["outage_resolved", 0x57f287, "야있날 게시 재개", false, false],
+  ] as const)("applies the %s display policy", (alert_level, color, title, silent, mention) => {
+    const event = normalizeInstagramEvent({ ...watchdogPayload, alert_level });
+    if (!event || event.status !== "failed") throw new Error("expected failure event");
+    expect(event.alertLevel).toBe(alert_level);
+
+    const message = buildInstagramMessage(event);
+    const embed = message.embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({
+      color,
+      title,
+      description: watchdogPayload.error_message,
+      author: { name: "야있날 @yaitnal" },
+    });
+    expect(json?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "게시물 유형", value: "경기 프리뷰" }),
+      ]),
+    );
+    expect(message.flags).toBe(silent ? MessageFlags.SuppressNotifications : undefined);
+    expect(message.content).toBe(mention ? "<@owner>" : undefined);
+    expect(message.allowedMentions).toEqual(mention ? { users: ["owner"] } : undefined);
+  });
+
+  it("leaves failures without alert_level as they were", () => {
+    const event = normalizeInstagramEvent(watchdogPayload);
+    if (!event || event.status !== "failed") throw new Error("expected failure event");
+    expect(event.alertLevel).toBeUndefined();
+
+    const message = buildInstagramMessage(event);
+    expect(Object.keys(message)).toEqual(["embeds", "components"]);
+    const embed = message.embeds?.[0];
+    const json = embed && "toJSON" in embed ? embed.toJSON() : embed;
+    expect(json).toMatchObject({ color: 0xed4245, title: "야있날 자동 게시 실패" });
+  });
+
+  it.each(["urgent", "DELAY", "constructor", "", 3, null, ["delay"]])(
+    "treats unknown alert_level %j as absent",
+    (alert_level) => {
+      const event = normalizeInstagramEvent({ ...watchdogPayload, alert_level });
+      if (!event || event.status !== "failed") throw new Error("expected failure event");
+      expect(event.alertLevel).toBeUndefined();
+      expect(JSON.stringify(buildInstagramMessage(event))).toBe(
+        JSON.stringify(buildInstagramMessage(normalizeInstagramEvent(watchdogPayload)!)),
+      );
+    },
+  );
 });

@@ -190,9 +190,18 @@ def _run_recovery(
         )
 
 
-def _notify(account: str, content_type: str, source_key: str, message: str) -> bool:
+# 단계별 알림 수준. 봇이 이 값으로 색·무음·멘션을 정한다(docs/alerts.md). 표에 없는 단계는 action.
+ALERT_LEVEL_BY_STAGE = {"initial": "delay", "final_published": "recovered"}
+OUTAGE_STREAK = 3
+OUTAGE_STALE_AFTER = timedelta(days=3)
+
+
+def _notify(
+    account: str, content_type: str, source_key: str, message: str, alert_level: str = "action"
+) -> bool:
     payload = {
         "status": "failed",
+        "alert_level": alert_level,
         "account": account,
         "error_type": "PublishWatchdog",
         "error_message": message,
@@ -220,6 +229,7 @@ def _alert_once(
     *,
     now: datetime | None = None,
     force_initial: bool = False,
+    alert_level: str | None = None,
 ) -> None:
     """job 단계별 최초·24시간 리마인더·최종 알림을 각각 한 번만 보낸다."""
     current = now or datetime.now(KST)
@@ -269,9 +279,23 @@ def _alert_once(
     if stage is None:
         return
     print(f"경고 발송: {key} [{stage}] — {alert_message}")
-    if _notify(account, content_type, key, alert_message):
+    level = alert_level or ALERT_LEVEL_BY_STAGE.get(stage, "action")
+    if _notify(account, content_type, key, alert_message, level):
         ledger.record_alert(key, stage, now=current)
         state.pop(key, None)  # 예전 6시간 중복 방지 키는 더 이상 사용하지 않는다.
+
+
+def _next_recovery_job(ledger: ReliabilityLedger, jobs: list[tuple]) -> tuple | None:
+    """복구할 작업 하나를 고른다. 지금 시도할 수 있는 것 중 시도 횟수가 가장 적은 것.
+
+    맨 앞 작업만 고르면, 끝나지 않는 작업 하나(예: 정책상 릴스 대상이 아닌 경기)가 뒤 작업을 영영 막는다.
+    """
+    due = [job for job in jobs if ledger.due_for_recovery(job[0])]
+    return min(
+        due,
+        key=lambda job: int((ledger.get(job[0]) or {}).get("recovery_attempts") or 0),
+        default=None,
+    )
 
 
 def _job_needs_alert_check(ledger: ReliabilityLedger, item: dict) -> bool:
@@ -577,8 +601,10 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             elif reel_state and reel_state["status"] in {"missing", "recovering"}:
                 missing_reel_jobs.append((reel_job, game_date, game_id))
 
-    if missing_flow_jobs:
-        job_id, game_date = missing_flow_jobs[0]
+    flow_job = _next_recovery_job(ledger, missing_flow_jobs)
+    reel_job = _next_recovery_job(ledger, missing_reel_jobs)
+    if flow_job:
+        job_id, game_date = flow_job
         _run_recovery(
             ledger,
             job_id,
@@ -594,8 +620,8 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
             cwd=HOME / "jakkuyagu",
             timeout=2700,
         )
-    elif missing_reel_jobs:
-        job_id, game_date, game_id = missing_reel_jobs[0]
+    elif reel_job:
+        job_id, game_date, game_id = reel_job
         _run_recovery(
             ledger,
             job_id,
@@ -770,6 +796,9 @@ def check_gonggu(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
             str(message),
             now=now,
             force_initial=reported,
+            alert_level=(
+                "action" if publication_state == "publication_confirmation_required" else None
+            ),
         )
 
 
@@ -976,8 +1005,40 @@ def weekly_digest_once(
         print(f"주간 다이제스트 발송: {week_key}")
 
 
+def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
+    """한 계정의 한 유형이 연속으로 미게시이면 한 번 알리고, 게시가 재개되면 한 번 닫는다.
+
+    건별 지연 알림은 평소에도 매일 나가서, 한 유형이 통째로 멈춘 상태가 따로 보이지 않았다.
+    """
+    open_outages = state.setdefault("_publish_outage", {})
+    for (account, content_type), (streak, last_published, newest) in ledger.unpublished_streaks(now).items():
+        name = f"{account} {content_type}"
+        opened = open_outages.get(name)
+        if streak and now - newest > OUTAGE_STALE_AFTER:
+            # 새 예정이 며칠째 없으면(시즌 종료·휴식기) 지난 미게시는 지금의 중단이 아니다.
+            if open_outages.pop(name, None):
+                print(f"게시 중단 종료(새 예정 없음): {name}")
+            continue
+        if streak >= OUTAGE_STREAK and not opened:
+            started = now.isoformat(timespec="minutes")
+            since = f"마지막 게시 {last_published[:10]}" if last_published else "게시 기록 없음"
+            message = f"{name} 최근 {streak}건 연속 미게시 — {since}"
+            print(f"게시 중단 경보: {message}")
+            if _notify(account, content_type, f"outage:{name}:{started}", message, "outage"):
+                open_outages[name] = {"since": started, "streak": streak}
+        elif streak == 0 and opened:
+            message = f"{name} 게시 재개 — 중단 감지 {opened['since']}"
+            print(f"게시 재개: {message}")
+            if _notify(account, content_type, f"outage:{name}:{opened['since']}", message, "outage_resolved"):
+                del open_outages[name]
+        elif opened:
+            opened["streak"] = streak
+
+
 def build_daily_publish_lines(
-    yesterday: list[tuple[str, str, int, int]], week: list[tuple[str, str, int, int]]
+    yesterday: list[tuple[str, str, int, int]],
+    week: list[tuple[str, str, int, int]],
+    outages: dict | None = None,
 ) -> list[str]:
     """어제와 최근 7일의 게시/예정 건수 요약 줄을 만든다(순수 함수)."""
     lines = [
@@ -995,6 +1056,11 @@ def build_daily_publish_lines(
     lines.append(
         "최근 7일: " + " · ".join(f"{account} {done}/{total}" for account, (done, total) in totals.items())
     )
+    if outages:
+        lines.append(
+            "게시 중단 중: "
+            + " · ".join(f"{name}(연속 {item['streak']}건)" for name, item in outages.items())
+        )
     return lines
 
 
@@ -1010,7 +1076,9 @@ def daily_publish_digest_once(state: dict, now: datetime, ledger: ReliabilityLed
     week = ledger.publish_counts((today - timedelta(days=7)).isoformat(), yesterday)
     if not week:
         return
-    lines = build_daily_publish_lines(ledger.publish_counts(yesterday, yesterday), week)
+    lines = build_daily_publish_lines(
+        ledger.publish_counts(yesterday, yesterday), week, state.get("_publish_outage")
+    )
     if _notify_digest(f"인스타 게시 실적 · {yesterday}", "\n".join(lines)):
         state["_instagram_daily_publish_digest"] = today.isoformat()
         print(f"일일 게시 실적 발송: {yesterday}")
@@ -1165,6 +1233,10 @@ def main(argv: list[str] | None = None) -> None:
         weekly_digest_once(state, now, ledger)
     except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
         print(f"warning: 주간 다이제스트 실패 — {type(error).__name__}: {error}")
+    try:
+        check_publish_outage(state, now, ledger)
+    except Exception as error:  # noqa: BLE001 - 중단 경보 실패가 감시를 막지 않는다
+        print(f"warning: 게시 중단 검사 실패 — {type(error).__name__}: {error}")
     try:
         daily_publish_digest_once(state, now, ledger)
     except Exception as error:  # 리포트 실패가 감시를 막지 않는다.

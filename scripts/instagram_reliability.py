@@ -334,6 +334,37 @@ class ReliabilityLedger:
         self.connection.commit()
         return bool(cursor.rowcount)
 
+    def unpublished_streaks(
+        self, now: datetime
+    ) -> dict[tuple[str, str], tuple[int, str | None, datetime]]:
+        """(계정, 유형)별 (기한이 지난 최근 작업의 연속 미게시 건수, 마지막 게시 작업의 due_at, 가장 최근 기한).
+
+        유형별로 센다. 계정 단위로 세면 주간·용어편 같은 다른 유형의 게시가 연속을 끊어
+        매일 나가야 할 유형이 멈춘 것을 가린다. 취소된 작업은 세지 않는다.
+        """
+        # due_at은 계정마다 시간대 표기(+09:00·+00:00)가 섞여 저장돼 문자열 비교가 틀린다. 파싱해서 비교한다.
+        rows = []
+        for account, content_type, status, due_at in self.connection.execute(
+            "SELECT account, content_type, status, due_at FROM jobs WHERE status!='cancelled'"
+        ):
+            due = datetime.fromisoformat(due_at)
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=timezone.utc)
+            rows.append((due, account, content_type, status, due_at))
+        streaks: dict[tuple[str, str], tuple[int, str | None, datetime]] = {}
+        done: set[tuple[str, str]] = set()
+        for due, account, content_type, status, due_at in sorted(rows, key=lambda row: row[0], reverse=True):
+            key = (account, content_type)
+            if due > now or key in done:
+                continue
+            count, _, newest = streaks.get(key, (0, None, due))
+            if status == "published":
+                streaks[key] = (count, due_at, newest)
+                done.add(key)
+            else:
+                streaks[key] = (count + 1, None, newest)
+        return streaks
+
     def publish_counts(self, first_day: str, last_day: str) -> list[tuple[str, str, int, int]]:
         """expected_at 날짜가 first_day~last_day인 작업의 계정·유형별 (게시, 전체). 취소는 뺀다.
 

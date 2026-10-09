@@ -1,6 +1,6 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } from "discord.js";
 import { findProjectByRepoFullName, type ProjectConfig } from "../projects.js";
-import { fetchAlertsChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, fetchDeployLogChannel } from "../discord/alerts.js";
 import { shouldDrop } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
@@ -78,14 +78,15 @@ async function handlePullRequest(
     if (!pr.merged) return;
     if (shouldDrop(`gh:pr-merged:${fullName}:${pr.number}`)) return;
     recordEvent("pr_merged", project.slug);
-    const channel = await fetchAlertsChannel();
+    // 머지 확인은 조치가 필요 없는 기록이라 로그 채널에 무음으로 남긴다.
+    const channel = await fetchDeployLogChannel();
     if (!channel) return;
     const embed = new EmbedBuilder()
       .setColor(0x22c55e)
       .setTitle(`🟢 [${project.name}] PR #${pr.number} 머지됨 — ${truncate(pr.title ?? "", 180)}`)
       .setFooter({ text: project.slug });
     if (pr.html_url) embed.setURL(pr.html_url);
-    await channel.send({ embeds: [embed] });
+    await channel.send({ embeds: [embed], flags: MessageFlags.SuppressNotifications });
     return;
   }
 
