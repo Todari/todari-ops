@@ -5,6 +5,7 @@ import { ghJson } from "../github/api.js";
 import { eventsSince, type EventKind } from "../stats/events.js";
 import { collectDeadlines, ddayLabel, getVaultState } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
+import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 
 // 금요일 18:00 KST 주간 요약: 레포별 7일 커밋·머지 PR(GitHub API) +
 // 봇이 관측한 운영 이벤트(장애·CI 실패·배포) + 다음 주 마감. /week 로 수동 게시.
@@ -16,11 +17,14 @@ export function startWeeklySummary(): void {
 }
 
 function scheduleNext(): void {
-  const delay = msUntilFridayKst(18, 0);
+  const next = msUntilFridayKst(18, 0);
+  // 오늘(금) 예약 시각이 지났는데 게시 기록이 없으면(배포·재시작으로 놓침) 바로 따라잡는다.
+  const delay = missedTodayKst("weekly", next, WEEK_MS) ? 0 : next;
   console.log(`[weekly] next run in ${Math.round(delay / 3600_000)}h (금 18:00 KST)`);
   setTimeout(async () => {
     try {
-      await postWeekly();
+      // 예약 게시는 KST 하루 한 번. 수동 /week 는 세지 않는다.
+      if (claimTodayKst("weekly")) await postWeekly();
     } catch (err) {
       console.error("[weekly] failed:", err);
       captureException(err, { kind: "weekly" });

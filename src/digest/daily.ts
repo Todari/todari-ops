@@ -7,6 +7,7 @@ import { captureException } from "../observability/sentry.js";
 import { putPendingAction } from "../webhook/pending.js";
 import { ghJson } from "../github/api.js";
 import { getTodayFirstTask } from "../checkin/index.js";
+import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 import {
   collectDeadlines,
   ddayLabel,
@@ -31,11 +32,14 @@ export function startDailyDigest(): void {
 }
 
 function scheduleNext(): void {
-  const delay = msUntilNextKst(env.DIGEST_TIME);
+  const next = msUntilNextKst(env.DIGEST_TIME);
+  // 오늘 예약 시각이 지났는데 게시 기록이 없으면(배포·재시작으로 놓침) 바로 따라잡는다.
+  const delay = missedTodayKst("digest", next) ? 0 : next;
   console.log(`[digest] next run in ${Math.round(delay / 60_000)}min (${env.DIGEST_TIME} KST)`);
   setTimeout(async () => {
     try {
-      await postDigest();
+      // 예약 게시는 KST 하루 한 번. 수동 /digest 는 세지 않는다.
+      if (claimTodayKst("digest")) await postDigest();
     } catch (err) {
       console.error("[digest] failed:", err);
       captureException(err, { kind: "digest" });

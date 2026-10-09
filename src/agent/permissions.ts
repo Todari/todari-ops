@@ -22,7 +22,6 @@ interface Pending {
 }
 
 const pending = new Map<string, Pending>();
-const TIMEOUT_MS = 60_000;
 
 const READ_ONLY_TOOLS = new Set([
   "Read",
@@ -90,7 +89,7 @@ export async function askPermission(args: AskPermissionArgs): Promise<Permission
         });
         resolve("deny");
       }
-    }, TIMEOUT_MS);
+    }, env.PERMISSION_TIMEOUT_MS);
     pending.set(id, { resolve, threadId: args.threadId, toolName: args.toolName, timer });
     void sendPrompt(args.thread, id, args.toolName, safeInput);
   });
@@ -120,6 +119,8 @@ async function sendPrompt(
   toolInput: unknown,
 ): Promise<void> {
   const inputStr = stringifyInput(toolInput);
+  const waitMs = env.PERMISSION_TIMEOUT_MS;
+  const wait = waitMs % 60_000 === 0 ? `${waitMs / 60_000}분` : `${Math.round(waitMs / 1000)}초`;
   const embed = new EmbedBuilder()
     .setColor(0xfacc15)
     .setTitle(`🔐 권한 요청: ${toolName}`)
@@ -129,7 +130,7 @@ async function sendPrompt(
         (inputStr.length > 1500 ? "\n…(truncated)" : "") +
         "\n```",
     )
-    .setFooter({ text: "60초 안에 응답 없으면 자동 거부" });
+    .setFooter({ text: `${wait} 안에 응답 없으면 자동 거부` });
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(`perm:approve:${id}`)
@@ -144,7 +145,13 @@ async function sendPrompt(
       .setLabel("Deny")
       .setStyle(ButtonStyle.Danger),
   );
-  await thread.send({ embeds: [embed], components: [row] });
+  // 서버 알림이 "@멘션만"이라 멘션이 없으면 푸시가 오지 않는다.
+  await thread.send({
+    content: `<@${env.OWNER_DISCORD_ID}>`,
+    embeds: [embed],
+    components: [row],
+    allowedMentions: { users: [env.OWNER_DISCORD_ID] },
+  });
 }
 
 function stringifyInput(v: unknown): string {

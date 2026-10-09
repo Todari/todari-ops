@@ -13,6 +13,7 @@ import { env } from "../env.js";
 import { fetchDigestChannel } from "../discord/alerts.js";
 import { todayKst } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
+import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 
 // 저녁 체크인: 21:30(KST) #daily 에 [회고 쓰기] 버튼 → 모달(오늘/막힘/내일)
 // → 제출 내용은 📥 인박스로 가서 스위퍼가 데일리 노트에 기록하고,
@@ -34,11 +35,14 @@ export function startEveningCheckin(): void {
 }
 
 function scheduleNext(): void {
-  const delay = msUntilKst(env.CHECKIN_TIME);
+  const next = msUntilKst(env.CHECKIN_TIME);
+  // 오늘 예약 시각이 지났는데 게시 기록이 없으면(배포·재시작으로 놓침) 바로 따라잡는다.
+  const delay = missedTodayKst("checkin", next) ? 0 : next;
   console.log(`[checkin] next prompt in ${Math.round(delay / 60_000)}min (${env.CHECKIN_TIME} KST)`);
   setTimeout(async () => {
     try {
-      await postCheckinPrompt();
+      // 예약 게시는 KST 하루 한 번. 수동 /checkin 은 세지 않는다.
+      if (claimTodayKst("checkin")) await postCheckinPrompt();
     } catch (err) {
       console.error("[checkin] failed:", err);
       captureException(err, { kind: "checkin" });

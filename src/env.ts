@@ -50,6 +50,8 @@ export const env = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
+  // 빈 값·비숫자·0이면 모든 권한 요청이 즉시 거부되므로 기본값으로 떨어뜨린다.
+  PERMISSION_TIMEOUT_MS: Number(process.env.PERMISSION_TIMEOUT_MS) || 600_000, // 권한 요청 자동 거부까지 대기(ms)
   PORT: Number(process.env.PORT ?? 3000),
   NODE_ENV: process.env.NODE_ENV ?? "development",
   JP_CHANNEL_ID: process.env.JP_CHANNEL_ID ?? "",

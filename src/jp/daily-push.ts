@@ -4,6 +4,7 @@ import { generateDailyPhrase } from "./tutor.js";
 import { insertCard, logDaily, recentDailyFronts } from "./cards.js";
 import { fetchJpChannel } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
+import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 
 // 매일 JP_PUSH_HOUR:JP_PUSH_MINUTE(KST)에 회화 표현 1개를 생성해 카드로
 // 저장하고 채널에 게시한다. digest/daily.ts · checkin/index.ts의
@@ -14,14 +15,17 @@ export function scheduleJpPush(client: Client): void {
 }
 
 function scheduleNext(client: Client): void {
-  const delay = msUntilNextKst(env.JP_PUSH_HOUR, env.JP_PUSH_MINUTE);
+  const next = msUntilNextKst(env.JP_PUSH_HOUR, env.JP_PUSH_MINUTE);
+  // 오늘 예약 시각이 지났는데 게시 기록이 없으면(배포·재시작으로 놓침) 바로 따라잡는다.
+  const delay = missedTodayKst("jp-push", next) ? 0 : next;
   console.log(
     `[jp-push] next run in ${Math.round(delay / 60_000)}min ` +
       `(${String(env.JP_PUSH_HOUR).padStart(2, "0")}:${String(env.JP_PUSH_MINUTE).padStart(2, "0")} KST)`,
   );
   setTimeout(async () => {
     try {
-      await runJpPush(client);
+      // 예약 게시는 KST 하루 한 번.
+      if (claimTodayKst("jp-push")) await runJpPush(client);
     } catch (err) {
       console.error("[jp-push] failed:", err);
       captureException(err, { kind: "jp-push" });

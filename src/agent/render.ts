@@ -1,4 +1,5 @@
 import { EmbedBuilder, type ThreadChannel } from "discord.js";
+import { env } from "../env.js";
 
 // Best-effort renderer. The exact SDK message shape may vary across versions —
 // we duck-type. Unknown shapes are silently ignored to avoid noise.
@@ -68,6 +69,23 @@ export async function renderEvent(thread: ThreadChannel, event: unknown): Promis
   }
 
   // Init / system events ignored
+}
+
+// 긴 턴이 끝났다는 한 줄. 서버 알림이 "@멘션만"이라 소유자를 멘션해야 푸시가 온다.
+// failure 가 있으면 실패·취소로 끝난 턴이다.
+export async function renderTurnEnd(
+  thread: ThreadChannel,
+  elapsedMs: number,
+  failure?: string,
+): Promise<void> {
+  const sec = Math.round(elapsedMs / 1000);
+  const line = failure
+    ? `⚠️ 작업이 중단됐습니다 · ${failure.split("\n")[0].slice(0, 200)}`
+    : `✅ 작업이 끝났습니다 · ${Math.floor(sec / 60)}분 ${sec % 60}초`;
+  await thread.send({
+    content: `<@${env.OWNER_DISCORD_ID}> ${line}`,
+    allowedMentions: { users: [env.OWNER_DISCORD_ID] },
+  });
 }
 
 async function renderToolUse(thread: ThreadChannel, name: string, input: unknown): Promise<void> {

@@ -13,7 +13,7 @@ import {
 import { findProject } from "../projects.js";
 import { ensureCheckout } from "../workspaces/checkout.js";
 import { askPermission } from "./permissions.js";
-import { renderEvent } from "./render.js";
+import { renderEvent, renderTurnEnd } from "./render.js";
 import { logAudit } from "../storage/audit.js";
 import { getDiscordClient } from "../discord/client.js";
 import { captureException } from "../observability/sentry.js";
@@ -26,6 +26,8 @@ interface ActiveTurn {
 
 const activeTurns = new Map<string, ActiveTurn>();
 const endingSessions = new Set<string>();
+// 이보다 오래 걸린 턴은 끝날 때 소유자를 멘션한다(짧은 턴은 지금처럼 조용히 끝난다).
+const TURN_NOTIFY_MS = 60_000;
 
 export function beginSessionEnd(threadId: string): "locked" | "active" | "ending" {
   if (activeTurns.has(threadId)) return "active";
@@ -108,6 +110,8 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
   // A close request can arrive while getSession above is awaited.
   if (endingSessions.has(args.threadId)) return;
   activeTurns.set(args.threadId, { abort, pendingPrompt: null });
+  const startedAt = Date.now();
+  let failure: string | undefined; // 실패·취소로 끝난 사유. 정상 종료면 undefined.
 
   try {
     let cwd: string;
@@ -130,6 +134,7 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
           "```",
         ].join("\n"),
       );
+      failure = "git clone 실패";
       return;
     }
 
@@ -169,10 +174,14 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
       input: { profile, result },
       decision: result ? result.is_error ? "failed" : "ok" : "unknown",
     });
+    if (!result || result.is_error) {
+      failure = result && result.subtype !== "success" ? result.subtype : "에이전트 오류";
+    }
   } catch (err) {
     if (abort.signal.aborted) {
       await thread.send("🛑 취소됨");
     } else {
+      failure = err instanceof Error ? err.message : String(err);
       console.error("[agent] error:", err);
       captureException(err, { kind: "agent", threadId: args.threadId });
       await thread.send(
@@ -180,6 +189,16 @@ export async function startTurn(args: StartTurnArgs): Promise<void> {
       );
     }
   } finally {
+    const elapsedMs = Date.now() - startedAt;
+    // 직접 취소한 턴은 이미 알고 있으니 멘션하지 않는다.
+    if (elapsedMs >= TURN_NOTIFY_MS && !abort.signal.aborted) {
+      // 알림 전송이 실패해도 아래 턴 정리는 반드시 실행돼야 한다.
+      try {
+        await renderTurnEnd(thread, elapsedMs, failure);
+      } catch (err) {
+        console.warn("[agent] turn-end notify failed:", err);
+      }
+    }
     const finished = activeTurns.get(args.threadId);
     activeTurns.delete(args.threadId);
     const queued = finished?.pendingPrompt;
