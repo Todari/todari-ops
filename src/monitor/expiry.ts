@@ -2,7 +2,7 @@ import { connect as tlsConnect } from "node:tls";
 import { resolveNs } from "node:dns/promises";
 import { EmbedBuilder } from "discord.js";
 import { getHealthTargets } from "../projects.js";
-import { fetchAlertsChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, ownerMention } from "../discord/alerts.js";
 import { env } from "../env.js";
 import { captureException } from "../observability/sentry.js";
 import { todayKst } from "../vault/state.js";
@@ -169,7 +169,7 @@ async function alertOnce(key: string, embed: EmbedBuilder): Promise<void> {
   }
   try {
     const channel = await fetchAlertsChannel();
-    if (channel) await channel.send({ embeds: [embed] });
+    if (channel) await channel.send({ ...ownerMention(), embeds: [embed] });
     console.log(`[expiry] alerted: ${key}`);
   } catch (err) {
     console.error("[expiry] alert failed:", err);

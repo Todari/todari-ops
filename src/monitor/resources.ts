@@ -1,7 +1,7 @@
 import { EmbedBuilder } from "discord.js";
 import { readFile, statfs } from "node:fs/promises";
 import { env } from "../env.js";
-import { fetchAlertsChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, ownerMention } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
 import { runtimeHealth } from "./health.js";
 
@@ -64,11 +64,13 @@ export function diskUsage(blocks: number, bfree: number, bavail: number): number
 const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const gb = (kb: number) => `${(kb / 1024 / 1024).toFixed(1)}GB`;
 
-async function send(title: string, desc: string, color: number): Promise<void> {
+// 경고는 소유자를 멘션한다. 회복 알림은 mention=false로 조용히 남긴다.
+async function send(title: string, desc: string, color: number, mention = true): Promise<void> {
   try {
     const channel = await fetchAlertsChannel();
     if (channel) {
       await channel.send({
+        ...(mention ? ownerMention() : {}),
         embeds: [new EmbedBuilder().setColor(color).setTitle(title).setDescription(desc)],
       });
     }
@@ -100,7 +102,7 @@ async function check(): Promise<void> {
     );
   } else if (memAlerted && mem < MEM_LO) {
     memAlerted = false;
-    await send("✅ 메모리 회복", `사용률 ${pct(mem)}로 내려감.`, 0x22c55e);
+    await send("✅ 메모리 회복", `사용률 ${pct(mem)}로 내려감.`, 0x22c55e, false);
   }
 
   try {
@@ -117,7 +119,7 @@ async function check(): Promise<void> {
       );
     } else if (diskAlerted && disk < DISK_LO) {
       diskAlerted = false;
-      await send("✅ 디스크 회복", `사용률 ${pct(disk)}로 내려감.`, 0x22c55e);
+      await send("✅ 디스크 회복", `사용률 ${pct(disk)}로 내려감.`, 0x22c55e, false);
     }
   } catch (err) {
     captureException(err, { kind: "disk-read" });
@@ -133,7 +135,7 @@ async function check(): Promise<void> {
     );
   } else if (swapAlerted && swap < SWAP_LO) {
     swapAlerted = false;
-    await send("✅ 스왑 정상", `스왑 사용 ${pct(swap)}로 내려감.`, 0x22c55e);
+    await send("✅ 스왑 정상", `스왑 사용 ${pct(swap)}로 내려감.`, 0x22c55e, false);
   }
   runtimeHealth.completeCheck("resources");
 }

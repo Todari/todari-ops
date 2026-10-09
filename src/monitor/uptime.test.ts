@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   env: { WORK_DIR: "/tmp/uptime-test/work", UPTIME_ENABLED: true, UPTIME_INTERVAL_MS: 300_000, ALERTS_CHANNEL_ID: "alerts" },
   projects: [] as ProjectConfig[],
   existsSync: vi.fn(), readFileSync: vi.fn(), mkdir: vi.fn(), writeFile: vi.fn(), rename: vi.fn(),
-  send: vi.fn(), recordEvent: vi.fn(), completeCheck: vi.fn(), expectCheck: vi.fn(),
+  send: vi.fn(), fetchMessage: vi.fn(), recordEvent: vi.fn(), completeCheck: vi.fn(), expectCheck: vi.fn(),
   fetch: vi.fn(),
 }));
 vi.mock("../env.js", () => ({ env: mocks.env }));
@@ -18,7 +18,10 @@ vi.mock("node:fs", async (original) => ({
   existsSync: mocks.existsSync, readFileSync: mocks.readFileSync,
 }));
 vi.mock("node:fs/promises", () => ({ mkdir: mocks.mkdir, writeFile: mocks.writeFile, rename: mocks.rename }));
-vi.mock("../discord/alerts.js", () => ({ fetchAlertsChannel: async () => ({ send: mocks.send }) }));
+vi.mock("../discord/alerts.js", () => ({
+  fetchAlertsChannel: async () => ({ send: mocks.send, messages: { fetch: mocks.fetchMessage } }),
+  ownerMention: () => ({ content: "<@owner>", allowedMentions: { users: ["owner"] } }),
+}));
 vi.mock("../observability/sentry.js", () => ({ captureException: vi.fn() }));
 vi.mock("../stats/events.js", () => ({ recordEvent: mocks.recordEvent }));
 vi.mock("./health.js", () => ({ runtimeHealth: { expectCheck: mocks.expectCheck, completeCheck: mocks.completeCheck } }));
@@ -87,6 +90,9 @@ describe("uptime status and alert lifecycle", () => {
     mocks.fetch.mockImplementation(async (url: string) => new Response(null, {
       status: url.includes("alpha") && failing ? 503 : 200,
     }));
+    const edit = vi.fn();
+    mocks.send.mockResolvedValue({ id: "down-1" });
+    mocks.fetchMessage.mockResolvedValue({ embeds: [{ title: "🔴 [alpha] DOWN", description: "원래 다운 사유" }], edit });
     uptime.startUptimeMonitor();
     await flush();
     expect(uptime.getUptimeSnapshot()[0]).toMatchObject({ key: "alpha", status: "unknown", lastOutcome: "failure" });
@@ -95,16 +101,26 @@ describe("uptime status and alert lifecycle", () => {
     await vi.advanceTimersByTimeAsync(INTERVAL);
     expect(uptime.getUptimeSnapshot()[0]).toMatchObject({ key: "alpha", status: "down" });
     expect(mocks.recordEvent).toHaveBeenCalledWith("uptime_down", "alpha");
+    // 다운은 소유자를 멘션하고, 복구 때 고쳐 쓸 메시지 위치를 재시작을 넘겨 기억한다.
     expect(mocks.send).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(mocks.writeFile.mock.lastCall![1]).alpha.up).toBe(false);
+    expect(mocks.send.mock.calls[0]![0]).toMatchObject({ content: "<@owner>" });
+    expect(JSON.parse(mocks.writeFile.mock.lastCall![1]).alpha).toMatchObject({ up: false, alertMessageId: "down-1" });
     await vi.advanceTimersByTimeAsync(INTERVAL);
     expect(mocks.send).toHaveBeenCalledTimes(1);
     failing = false;
     await vi.advanceTimersByTimeAsync(INTERVAL);
     expect(uptime.getUptimeSnapshot().every((entry) => entry.status === "healthy")).toBe(true);
     expect(mocks.recordEvent).toHaveBeenLastCalledWith("uptime_recover", "alpha");
-    expect(mocks.send).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(mocks.writeFile.mock.lastCall![1]).alpha.up).toBe(true);
+    // 복구는 새 메시지 없이 다운 알림을 고쳐 쓴다.
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchMessage).toHaveBeenCalledWith("down-1");
+    expect(edit.mock.calls[0]![0]).toMatchObject({ content: null });
+    expect(edit.mock.calls[0]![0].embeds[0].toJSON()).toMatchObject({
+      title: "🟢 [alpha] 복구됨",
+      description: "원래 다운 사유",
+      fields: [{ name: "복구", value: expect.stringContaining("다운타임") }],
+    });
+    expect(JSON.parse(mocks.writeFile.mock.lastCall![1]).alpha).toEqual({ up: true, downSince: null });
   });
 
   it("marks old success and failure results stale instead of asserting current health", async () => {

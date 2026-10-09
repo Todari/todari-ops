@@ -1,6 +1,6 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } from "discord.js";
 import { findProjectByRepoFullName, type ProjectConfig } from "../projects.js";
-import { fetchAlertsChannel, fetchDeployLogChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, fetchDeployLogChannel, ownerMention } from "../discord/alerts.js";
 import { shouldDrop } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
@@ -150,7 +150,10 @@ async function handlePullRequest(
       new ButtonBuilder().setLabel("Open PR").setStyle(ButtonStyle.Link).setURL(pr.html_url),
     );
   }
-  await channel.send({ embeds: [embed], components: [row] });
+  // 내가 연 PR과 봇 PR에는 푸시가 필요 없다. 다른 사람이 리뷰를 기다릴 때만 멘션한다.
+  const author = pr.user?.login ?? "";
+  const awaitsOwner = author !== "" && author !== fullName.split("/")[0] && !author.endsWith("[bot]");
+  await channel.send({ ...(awaitsOwner ? ownerMention() : {}), embeds: [embed], components: [row] });
 }
 
 async function handleWorkflowRun(
@@ -207,7 +210,7 @@ async function handleWorkflowRun(
       new ButtonBuilder().setLabel("Open run").setStyle(ButtonStyle.Link).setURL(run.html_url),
     );
   }
-  const alertMessage = await channel.send({ embeds: [embed], components: [row] });
+  const alertMessage = await channel.send({ ...ownerMention(), embeds: [embed], components: [row] });
 
   runAutoDiagnosis({
     project,

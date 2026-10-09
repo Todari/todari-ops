@@ -2,6 +2,14 @@ import { ChannelType, type TextChannel } from "discord.js";
 import { env } from "../env.js";
 import { getDiscordClient } from "./client.js";
 
+/**
+ * 사람이 움직여야 하는 알림에 붙인다. 서버 알림 기본값이 "@멘션만"이라 멘션이 없으면 푸시가 오지 않는다.
+ * 복구·성공처럼 조치가 필요 없는 알림에는 붙이지 않는다(docs/alerts.md).
+ */
+export function ownerMention(): { content: string; allowedMentions: { users: string[] } } {
+  return { content: `<@${env.OWNER_DISCORD_ID}>`, allowedMentions: { users: [env.OWNER_DISCORD_ID] } };
+}
+
 // Shared by sentry/vercel/github webhook handlers, uptime monitor, digest.
 export async function fetchAlertsChannel(): Promise<TextChannel | null> {
   return fetchTextChannel(env.ALERTS_CHANNEL_ID, "alerts");

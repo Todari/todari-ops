@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { env } from "../env.js";
 import { findProject, type ProjectConfig } from "../projects.js";
 // Node 22 has global fetch — no import needed.
-import { fetchAlertsChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, ownerMention } from "../discord/alerts.js";
 import { shouldDrop } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
@@ -153,7 +153,7 @@ export async function handleSentryEvent(slug: string, payload: unknown): Promise
 
   const embed = buildEmbed(project, issue, event, issueTitle, issueUrl);
   const components = buildButtons(id, issueUrl);
-  const alertMessage = await channel.send({ embeds: [embed], components });
+  const alertMessage = await channel.send({ ...ownerMention(), embeds: [embed], components });
   recordEvent("sentry_alert", project.slug);
 
   runAutoDiagnosis({

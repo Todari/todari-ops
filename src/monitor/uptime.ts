@@ -4,7 +4,7 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
 import { getHealthTargets, type HealthTarget, type ProjectHealthCheck } from "../projects.js";
-import { fetchAlertsChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, ownerMention } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
 import { recordEvent } from "../stats/events.js";
 import { runtimeHealth } from "./health.js";
@@ -22,6 +22,8 @@ interface TargetState {
   lastDetail: string;
   lastCheckedAt: number | null;
   lastOutcome: "success" | "failure" | null;
+  /** 다운 알림 메시지. 복구되면 새로 보내지 않고 이 메시지를 고친다. */
+  alertMessageId?: string;
 }
 
 const states = new Map<string, TargetState>();
@@ -38,13 +40,14 @@ function loadPersistedStates(): void {
     if (!existsSync(STATE_FILE)) return;
     const raw = JSON.parse(readFileSync(STATE_FILE, "utf8")) as Record<
       string,
-      { up: boolean; downSince: number | null }
+      { up: boolean; downSince: number | null; alertMessageId?: string }
     >;
     for (const [slug, s] of Object.entries(raw)) {
       states.set(slug, {
         up: s.up,
         failCount: s.up ? 0 : FAIL_THRESHOLD,
         downSince: s.downSince,
+        alertMessageId: s.alertMessageId,
         lastDetail: "(재시작 전 상태 복원)",
         lastCheckedAt: null,
         lastOutcome: null,
@@ -61,8 +64,10 @@ function persistStates(): Promise<void> {
   // All targets share the same temporary file. Serialize writes so one target
   // cannot rename another target's in-flight write or overwrite a newer state.
   stateWrites = stateWrites.then(async () => {
-    const out: Record<string, { up: boolean; downSince: number | null }> = {};
-    for (const [slug, s] of states) out[slug] = { up: s.up, downSince: s.downSince };
+    const out: Record<string, { up: boolean; downSince: number | null; alertMessageId?: string }> = {};
+    for (const [slug, s] of states) {
+      out[slug] = { up: s.up, downSince: s.downSince, alertMessageId: s.alertMessageId };
+    }
     await mkdir(path.dirname(STATE_FILE), { recursive: true });
     const tmp = STATE_FILE + ".tmp";
     await writeFile(tmp, JSON.stringify(out, null, 2));
@@ -221,11 +226,12 @@ async function check(p: HealthTarget): Promise<void> {
     }
   }
   states.set(p.key, st);
+  // 다운은 멘션과 함께 새로 올리고, 복구는 그 메시지를 고쳐 쓴다(문제 하나에 메시지 하나).
+  if (alert) st.alertMessageId = await postAlert(alert, event === "uptime_down", st.alertMessageId);
   if (event) {
     recordEvent(event, p.slug);
     await persistStates();
   }
-  if (alert) await postAlert(alert);
 }
 
 export async function probe(
@@ -278,14 +284,34 @@ export async function probe(
   }
 }
 
-async function postAlert(embed: EmbedBuilder): Promise<void> {
+/**
+ * 다운 알림은 소유자를 멘션해 올리고 그 메시지 ID를 돌려준다. 복구 알림은 푸시 없이 다운 메시지를
+ * 초록으로 고쳐 쓰고(없으면 새로 올리고) undefined를 돌려준다.
+ */
+async function postAlert(embed: EmbedBuilder, down: boolean, downMessageId?: string): Promise<string | undefined> {
   try {
     const channel = await fetchAlertsChannel();
-    if (channel) await channel.send({ embeds: [embed] });
+    if (!channel) return undefined;
+    if (down) return (await channel.send({ ...ownerMention(), embeds: [embed] })).id;
+    if (downMessageId) {
+      try {
+        const message = await channel.messages.fetch(downMessageId);
+        const closed = EmbedBuilder.from(message.embeds[0])
+          .setColor(embed.data.color ?? null)
+          .setTitle(embed.data.title ?? null)
+          .addFields({ name: "복구", value: embed.data.description ?? "복구됨" });
+        await message.edit({ content: null, embeds: [closed] });
+        return undefined;
+      } catch (err) {
+        console.warn("[uptime] down alert edit failed — posting recovery as a new message:", err);
+      }
+    }
+    await channel.send({ embeds: [embed] });
   } catch (err) {
     console.error("[uptime] alert post failed:", err);
     captureException(err, { kind: "uptime-alert" });
   }
+  return undefined;
 }
 
 function formatDuration(ms: number): string {

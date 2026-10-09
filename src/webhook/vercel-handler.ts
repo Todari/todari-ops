@@ -1,7 +1,14 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, type Message } from "discord.js";
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  type Message,
+  MessageFlags,
+} from "discord.js";
 import { findProjectByLooseName, type ProjectConfig } from "../projects.js";
 import { probe } from "../monitor/uptime.js";
-import { fetchAlertsChannel } from "../discord/alerts.js";
+import { fetchAlertsChannel, fetchDeployLogChannel, ownerMention } from "../discord/alerts.js";
 import { shouldDrop } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
@@ -54,9 +61,9 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
     if (target === "production") recordEvent("vercel_deploy", project?.slug ?? name);
     const wasFailed = lastFailed.has(name);
     lastFailed.delete(name);
-    // 복구는 항상 알리고, 평상시 프로덕션 성공은 컴팩트 초록 한 줄.
+    // 복구는 조치 채널에 알리고, 평상시 프로덕션 성공은 배포 로그에 컴팩트 초록 한 줄로 남긴다.
     if (!wasFailed && target !== "production") return;
-    const channel = await fetchAlertsChannel();
+    const channel = wasFailed ? await fetchAlertsChannel() : await fetchDeployLogChannel();
     if (!channel) return;
     const embed = new EmbedBuilder()
       .setColor(0x22c55e)
@@ -67,7 +74,7 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
       )
       .setDescription(commitMsg ? `\`${branch ?? "?"}\` ${commitMsg}` : null);
     if (inspectUrl) embed.setURL(inspectUrl);
-    const sent = await channel.send({ embeds: [embed] });
+    const sent = await channel.send({ embeds: [embed], flags: MessageFlags.SuppressNotifications });
     // 배포 후 스모크 체크: Vercel 말만 믿지 않고 실제 프로덕션 URL 확인.
     if (target === "production" && project?.healthUrl) {
       void smokeCheck(sent, project.healthUrl);
@@ -112,6 +119,7 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
     );
   }
   await channel.send({
+    ...ownerMention(),
     embeds: [embed],
     components: row.components.length > 0 ? [row] : [],
   });
