@@ -201,6 +201,8 @@ export function startContentWorker(client: Client): void {
           const channel = await client.channels.fetch(job.channel);
           if (!channel?.isSendable()) continue;
           const send = (content: string) => channel.send({ content, allowedMentions: { parse: [] } });
+          // 승인·재시도처럼 답을 기다리는 메시지는 소유자만 멘션해 푸시가 가게 한다(서버 알림 기본값이 "@멘션만").
+          const ping = { mention: `<@${env.OWNER_DISCORD_ID}> `, allowedMentions: { users: [env.OWNER_DISCORD_ID] } };
           if (job.state === "queued" || job.state === "approved" || job.state === "revising" || job.state === "recovering") {
             const publishing = job.state === "approved";
             const revising = job.state === "revising";
@@ -264,9 +266,9 @@ export function startContentWorker(client: Client): void {
               const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder().setCustomId(`content:approve:${job.id}:${job.hash}`).setLabel(publishReady(job.kind, result.account) ? "승인하고 게시" : "계정 연결 후 게시 가능").setDisabled(!publishReady(job.kind, result.account)).setStyle(ButtonStyle.Success),
                 new ButtonBuilder().setCustomId(`content:reject:${job.id}:${job.hash}`).setLabel("반려").setStyle(ButtonStyle.Danger));
-              message = await target.send({ content: `검토 요청: ${job.topic}\n게시 대상 계정 ID: ${result.account ?? "미연결 · 제작/검토 전용"}\n${result.caption}\n자동 검수: ${result.review.summary}${guide}\n작업: ${job.id}`.slice(0, 1900),
+              message = await target.send({ content: `${ping.mention}검토 요청: ${job.topic}\n게시 대상 계정 ID: ${result.account ?? "미연결 · 제작/검토 전용"}\n${result.caption}\n자동 검수: ${result.review.summary}${guide}\n작업: ${job.id}`.slice(0, 1900),
                 files: result.previews.map((p: string) => ({ attachment: join(dir, p), name: p })),
-                components: [buttons], allowedMentions: { parse: [] } });
+                components: [buttons], allowedMentions: ping.allowedMentions });
             } else {
               const draft = JSON.parse(readFileSync(join(dir, "draft.json"), "utf8"));
               const failed = (draft.failed_panels ?? []) as { index: number | null; blockers?: string[]; error?: string }[];
@@ -274,9 +276,9 @@ export function startContentWorker(client: Client): void {
               if (!lines.length && draft.final_review?.blockers?.length) lines.push(`전체: ${draft.final_review.blockers.join(" / ")}`);
               const retry = new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder().setCustomId(`content:retry:${job.id}`).setLabel("같은 이야기 처음부터 다시").setStyle(ButtonStyle.Secondary));
-              message = await target.send({ content: `초안(게시 불가): ${job.topic}\n자동 검수를 통과하지 못한 컷이 있습니다.\n${lines.join("\n")}\n${draft.caption ?? ""}${guide}\n작업: ${job.id}`.slice(0, 1900),
+              message = await target.send({ content: `${ping.mention}초안(게시 불가): ${job.topic}\n자동 검수를 통과하지 못한 컷이 있습니다.\n${lines.join("\n")}\n${draft.caption ?? ""}${guide}\n작업: ${job.id}`.slice(0, 1900),
                 files: (draft.previews ?? []).map((p: string) => ({ attachment: join(dir, p), name: p })),
-                components: [retry], allowedMentions: { parse: [] } });
+                components: [retry], allowedMentions: ping.allowedMentions });
             }
             const latest = jobs.get(job.id);
             latest.message = message.id; latest.thread = job.thread;
@@ -288,10 +290,13 @@ export function startContentWorker(client: Client): void {
             if (job.kind === "instatoon" && job.state === "failed") {
               const retry = new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder().setCustomId(`content:retry:${job.id}`).setLabel("같은 이야기 다시 제작").setStyle(ButtonStyle.Primary));
-              await channel.send({ content: `${notice}\n같은 이야기로 새 초안을 다시 생성할 수 있습니다. 다시 제작하면 API 비용이 발생합니다.`,
-                components: [retry], allowedMentions: { parse: [] } });
-            } else {
+              await channel.send({ content: `${ping.mention}${notice}\n같은 이야기로 새 초안을 다시 생성할 수 있습니다. 다시 제작하면 API 비용이 발생합니다.`,
+                components: [retry], allowedMentions: ping.allowedMentions });
+            } else if (job.state === "published") {
               await send(notice);
+            } else {
+              // 실패·결과 불확실은 확인이 필요하다.
+              await channel.send({ content: `${ping.mention}${notice}`, allowedMentions: ping.allowedMentions });
             }
             job.message = `notice:${job.state}`; jobs.save(job);
           }
