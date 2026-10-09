@@ -11,6 +11,10 @@ from pathlib import Path
 STATUSES = {"expected", "missing", "recovering", "published", "cancelled", "operator_required"}
 
 
+# 예정 시각은 계정마다 KST·UTC 표기가 섞여 저장된다. 하루는 KST 날짜로 묶는다.
+_KST_DAY = "substr(datetime(expected_at, '+9 hours'), 1, 10)"
+
+
 def _timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -366,20 +370,31 @@ class ReliabilityLedger:
         return streaks
 
     def publish_counts(self, first_day: str, last_day: str) -> list[tuple[str, str, int, int]]:
-        """expected_at 날짜가 first_day~last_day인 작업의 계정·유형별 (게시, 전체). 취소는 뺀다.
-
-        ponytail: 저장된 문자열의 날짜 부분으로 묶는다. 계정마다 KST·UTC 표기가 섞여 있어
-        하루 경계가 최대 9시간 어긋날 수 있다. 정확한 경계가 필요해지면 기대 시각을 KST로 통일한다.
-        """
+        """예정일(KST)이 first_day~last_day인 작업의 계정·유형별 (게시, 전체). 취소는 뺀다."""
         return [
             (account, content_type, int(published or 0), int(total))
             for account, content_type, published, total in self.connection.execute(
-                """
+                f"""
                 SELECT account, content_type, SUM(status='published'), COUNT(*)
                 FROM jobs
-                WHERE substr(expected_at, 1, 10) BETWEEN ? AND ? AND status != 'cancelled'
+                WHERE {_KST_DAY} BETWEEN ? AND ? AND status != 'cancelled'
                 GROUP BY account, content_type
                 ORDER BY account, content_type
+                """,
+                (first_day, last_day),
+            )
+        ]
+
+    def day_status_counts(self, first_day: str, last_day: str) -> list[tuple[str, str, str, int]]:
+        """예정일(KST)이 first_day~last_day인 작업의 (계정, 예정일, 상태, 건수). 취소는 뺀다."""
+        return [
+            (account, day, status, int(count))
+            for account, day, status, count in self.connection.execute(
+                f"""
+                SELECT account, {_KST_DAY} AS day, status, COUNT(*)
+                FROM jobs
+                WHERE day BETWEEN ? AND ? AND status != 'cancelled'
+                GROUP BY account, day, status
                 """,
                 (first_day, last_day),
             )

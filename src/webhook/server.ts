@@ -11,6 +11,7 @@ import { jpExport } from "../jp/export.js";
 import { handleInstagramEvent, normalizeInstagramEvent } from "./instagram-handler.js";
 import { getDiscordClient } from "../discord/client.js";
 import { isDiscordConnected, runtimeHealth } from "../monitor/health.js";
+import { updateStatusBoard } from "../monitor/status-board.js";
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -120,6 +121,11 @@ async function handleInstagramWebhook(
   if (payload === undefined) return;
   if ((payload as { status?: unknown } | null)?.status === "heartbeat") {
     runtimeHealth.completeCheck(WATCHDOG_CHECK);
+    // 생존 신호에 실려 온 인스타 현황으로 상태판을 고쳐 쓴다. 실패해도 생존 신호는 받은 것이다.
+    const board = (payload as { board?: unknown }).board;
+    void updateStatusBoard(typeof board === "string" && board ? board.slice(0, 1000) : null).catch(
+      (err) => console.warn("[status] board update failed:", err),
+    );
     writeJson(res, 200, { ok: true });
     return;
   }

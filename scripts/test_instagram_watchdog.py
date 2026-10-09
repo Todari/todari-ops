@@ -300,6 +300,37 @@ class InstagramWatchdogTest(unittest.TestCase):
             "게시 중단 중: jujinmo close_explainer(연속 3건)",
         )
 
+    def test_status_board_groups_each_account_by_kst_day_with_open_problems(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            now = datetime(2026, 10, 9, 12, 0, tzinfo=KST)
+
+            def job(account: str, content_type: str, expected: datetime, published: bool, key: str) -> None:
+                ledger.sync(
+                    job_id=f"{account}:{key}", account=account, content_type=content_type, source_key=key,
+                    expected_at=expected, due_at=expected + timedelta(hours=1), published=published, now=now,
+                )
+
+            job("jujinmo", "close_explainer", datetime(2026, 10, 8, 15, 40, tzinfo=KST), True, "c8")
+            job("jujinmo", "premarket_hypothesis", datetime(2026, 10, 8, 7, 40, tzinfo=KST), False, "p8")
+            # UTC로 저장된 예정 시각도 KST 날짜로 묶인다(10/8 23:00 UTC = 10/9 08:00 KST).
+            job("sector4", "race-result", datetime(2026, 10, 8, 23, 0, tzinfo=timezone.utc), True, "r")
+            job("gonggu", "gonggu-daily", datetime(2026, 10, 9, 10, 35, tzinfo=KST), False, "g9")
+            job("gonggu", "gonggu-daily", datetime(2026, 10, 9, 13, 0, tzinfo=KST), False, "g9b")  # 기한 전
+            board = watchdog.build_status_board(
+                now, ledger, {"jakkuyagu game-flow-reel": {"since": "x", "streak": 40}}
+            )
+            ledger.close()
+
+        self.assertEqual(board.split("\n"), [
+            "🟢 **섹터4** 오늘 1/1 · 어제 예정 없음",
+            "🔴 **야있날** 오늘 예정 없음 · 어제 예정 없음",
+            "└ 게시 중단: game-flow-reel 연속 40건",
+            "🟡 **주진모** 오늘 예정 없음 · 어제 1/2",
+            "🟡 **공구함** 오늘 0/2 · 어제 예정 없음",
+            "└ 지연 1건",
+        ])
+
     def test_daily_publish_digest_reports_yesterday_once_after_nine(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")

@@ -197,6 +197,7 @@ ALERT_LEVEL_BY_STAGE = {
     "resolved_published": "recovered",
 }
 OUTAGE_STREAK = 3
+ACCOUNT_LABELS = {"sector4": "섹터4", "jakkuyagu": "야있날", "jujinmo": "주진모", "gonggu": "공구함"}
 OUTAGE_STALE_AFTER = timedelta(days=3)
 
 
@@ -1057,6 +1058,53 @@ def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) 
             opened["streak"] = streak
 
 
+def build_status_board(now: datetime, ledger: ReliabilityLedger, outages: dict | None = None) -> str:
+    """#상태판에 실을 계정별 현황. 계정마다 한 줄, 봐야 할 것이 있으면 그 아래 한 줄."""
+    today = now.astimezone(KST).date().isoformat()
+    yesterday = (now.astimezone(KST).date() - timedelta(days=1)).isoformat()
+    counts: dict[tuple[str, str, str], int] = {
+        (account, day, status): count
+        for account, day, status, count in ledger.day_status_counts(yesterday, today)
+    }
+
+    def tally(account: str, day: str, *statuses: str) -> int:
+        return sum(
+            count
+            for (name, on, status), count in counts.items()
+            if name == account and on == day and (not statuses or status in statuses)
+        )
+
+    def ratio(account: str, day: str) -> str:
+        total = tally(account, day)
+        return f"{tally(account, day, 'published')}/{total}" if total else "예정 없음"
+
+    lines = []
+    for account, label in ACCOUNT_LABELS.items():
+        stopped = [
+            f"{name.split(' ', 1)[1]} 연속 {item['streak']}건"
+            for name, item in (outages or {}).items()
+            if name.split(" ", 1)[0] == account
+        ]
+        waiting = tally(account, today, "operator_required") + tally(account, yesterday, "operator_required")
+        delayed = tally(account, today, "missing", "recovering")
+        missed = tally(account, yesterday) - tally(account, yesterday, "published")
+        if stopped:
+            icon = "🔴"
+        elif waiting or delayed or missed:
+            icon = "🟡"
+        else:
+            icon = "🟢" if tally(account, today) or tally(account, yesterday) else "⚪"
+        lines.append(f"{icon} **{label}** 오늘 {ratio(account, today)} · 어제 {ratio(account, yesterday)}")
+        notes = (
+            ([f"게시 중단: {' · '.join(stopped)}"] if stopped else [])
+            + ([f"확인 필요 {waiting}건"] if waiting else [])
+            + ([f"지연 {delayed}건"] if delayed else [])
+        )
+        if notes:
+            lines.append("└ " + " · ".join(notes))
+    return "\n".join(lines)
+
+
 def build_daily_publish_lines(
     yesterday: list[tuple[str, str, int, int]],
     week: list[tuple[str, str, int, int]],
@@ -1264,7 +1312,12 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as error:  # 리포트 실패가 감시를 막지 않는다.
         print(f"warning: 일일 게시 실적 실패 — {type(error).__name__}: {error}")
     # 봇의 /healthz가 이 신호의 신선도를 본다. 크론이 멈추면 외부 감시가 알린다.
-    sent, detail = _post_signed_payload(HOME / "jujinmo" / ".env", {"status": "heartbeat"})
+    heartbeat = {"status": "heartbeat"}
+    try:
+        heartbeat["board"] = build_status_board(now, ledger, state.get("_publish_outage"))
+    except Exception as error:  # noqa: BLE001 - 상태판 실패가 생존 신호를 막지 않는다
+        print(f"warning: 상태판 현황 실패 — {type(error).__name__}: {error}")
+    sent, detail = _post_signed_payload(HOME / "jujinmo" / ".env", heartbeat)
     if not sent:
         print(f"warning: 생존 신호 전송 실패 — {detail}")
     _save_state(state)
