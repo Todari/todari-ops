@@ -10,6 +10,8 @@ export interface ProblemMessage {
   channelId: string;
   messageId: string;
   at: number;
+  /** 소유자가 "확인함"을 눌렀다. 닫힐 때까지 같은 문제를 다시 알리지 않는다. */
+  acked?: boolean;
 }
 
 const FILE = path.resolve(env.WORK_DIR, "..", "instagram-problems.json");
@@ -21,6 +23,10 @@ const load = () => (problems ??= readJsonObject<ProblemMessage>(FILE));
 
 export function getProblemMessage(key: string): ProblemMessage | undefined {
   return load()[key];
+}
+
+export function findProblemKey(messageId: string): string | undefined {
+  return Object.entries(load()).find(([, value]) => value.messageId === messageId)?.[0];
 }
 
 /** value가 null이면 기록을 지운다. */

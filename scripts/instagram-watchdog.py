@@ -199,6 +199,7 @@ ALERT_LEVEL_BY_STAGE = {
 OUTAGE_STREAK = 3
 ACCOUNT_LABELS = {"sector4": "섹터4", "jakkuyagu": "야있날", "jujinmo": "주진모", "gonggu": "공구함"}
 OUTAGE_STALE_AFTER = timedelta(days=3)
+OUTAGE_REMIND_EVERY = timedelta(days=3)
 
 
 def _notify(
@@ -1056,6 +1057,14 @@ def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) 
                 del open_outages[name]
         elif opened:
             opened["streak"] = streak
+            # 열린 채 방치되지 않게 사흘마다 다시 알린다. 봇은 "확인함"을 누른 문제면 보내지 않는다.
+            last = datetime.fromisoformat(opened.get("reminded") or opened["since"])
+            if now - last >= OUTAGE_REMIND_EVERY:
+                days = (now - datetime.fromisoformat(opened["since"])).days
+                message = f"{name} 아직 게시 중단 — {days}일째, 연속 {streak}건 미게시"
+                if _notify(account, content_type, f"outage:{name}:{opened['since']}", message, "outage"):
+                    opened["reminded"] = now.isoformat(timespec="minutes")
+                    print(f"게시 중단 다시 알림: {message}")
 
 
 def _label(name: str) -> str:

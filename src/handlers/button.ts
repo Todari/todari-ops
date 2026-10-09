@@ -5,6 +5,7 @@ import { resolvePending, type PermissionDecision } from "../agent/permissions.js
 import { spawnSessionThread } from "../agent/bootstrap.js";
 import { findProject } from "../projects.js";
 import { deletePendingAction, getPendingAction } from "../webhook/pending.js";
+import { ACK_BUTTON_ID, acknowledgeProblem } from "../webhook/instagram-handler.js";
 import { buildCheckinModal } from "../checkin/index.js";
 import { fetchInboxChannel } from "../discord/alerts.js";
 import { dueCards, gradeCard } from "../jp/cards.js";
@@ -39,6 +40,11 @@ export async function handleButton(interaction: ButtonInteraction): Promise<void
       content: `${label} (by ${interaction.user.username})`,
       components: [],
     });
+    return;
+  }
+
+  if (kind === ACK_BUTTON_ID) {
+    await acknowledgeProblem(interaction);
     return;
   }
 

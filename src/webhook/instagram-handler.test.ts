@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import {
+  acknowledgeProblem,
   buildInstagramMessage,
   handleInstagramEvent,
   normalizeInstagramEvent,
@@ -19,6 +20,7 @@ const mocks = vi.hoisted(() => {
     alertsSend: sender("alerts"),
     digestSend: sender("digest"),
     fetchMessage: vi.fn(),
+    deleteMessage: vi.fn(async (_id: string) => {}),
   };
 });
 vi.mock("../env.js", () => ({ env: mocks.env }));
@@ -26,7 +28,7 @@ vi.mock("../discord/alerts.js", () => ({
   fetchInstagramChannel: async () => ({ send: mocks.send }),
   fetchAlertsChannel: async () => ({ send: mocks.alertsSend }),
   fetchDigestChannel: async () => ({ send: mocks.digestSend }),
-  fetchTextChannel: async () => ({ messages: { fetch: mocks.fetchMessage } }),
+  fetchTextChannel: async () => ({ messages: { fetch: mocks.fetchMessage, delete: mocks.deleteMessage } }),
 }));
 afterAll(() => rmSync(dirname(mocks.env.WORK_DIR), { recursive: true, force: true }));
 
@@ -380,7 +382,7 @@ describe("watchdog alert levels", () => {
     for (const mock of [mocks.send, mocks.alertsSend, mocks.fetchMessage]) mock.mockClear();
     const edit = vi.fn();
     const original = (alert_level: string) => ({
-      embeds: buildInstagramMessage(normalizeInstagramEvent({ ...watchdogPayload, alert_level })!).embeds,
+      ...buildInstagramMessage(normalizeInstagramEvent({ ...watchdogPayload, alert_level })!),
       edit,
     });
     const deliver = async (alert_level: string, source_key: string, handle = handleInstagramEvent) =>
@@ -403,6 +405,8 @@ describe("watchdog alert levels", () => {
     );
     expect(mocks.fetchMessage.mock.calls.map(([id]) => id)).toEqual(sentIds);
     const edits = edit.mock.calls.map(([message]) => ({ content: message.content, ...message.embeds[0].toJSON() }));
+    // 닫힌 메시지에는 "확인함" 줄이 남지 않는다(계정 링크 줄만 남는다).
+    expect(edit.mock.calls.map(([message]) => message.components.length)).toEqual([1, 1]);
     expect(edits).toMatchObject([
       { content: null, title: "야있날 지연 게시 완료", color: 0x57f287, description: watchdogPayload.error_message },
       { content: null, title: "야있날 게시 재개", color: 0x57f287, description: watchdogPayload.error_message },
@@ -416,6 +420,50 @@ describe("watchdog alert levels", () => {
     mocks.fetchMessage.mockClear();
     expect(await deliver("outage_closed", "one:outage", restarted)).toBe(true);
     expect([mocks.fetchMessage.mock.calls.length, mocks.alertsSend.mock.calls.length]).toEqual([0, 2]);
+  });
+
+  it("re-alerts by replacing the first message, and stays quiet once the owner acknowledged it", async () => {
+    for (const mock of [mocks.alertsSend, mocks.deleteMessage]) mock.mockClear();
+    vi.useFakeTimers({ now: Date.parse("2026-10-09T09:37:00+09:00") });
+    const remind = () =>
+      handleInstagramEvent(
+        normalizeInstagramEvent({ ...watchdogPayload, alert_level: "outage", source_key: "ack:outage" })!,
+      );
+    const sentId = async (index: number) => (await mocks.alertsSend.mock.results[index]!.value).id;
+
+    expect(await remind()).toBe(true);
+    const first = mocks.alertsSend.mock.calls[0]![0];
+    expect(first.components.map((row: { toJSON(): unknown }) => row.toJSON())).toMatchObject([
+      { components: [{ label: "Instagram 계정 확인" }] },
+      { components: [{ custom_id: "igack", label: "확인함" }] },
+    ]);
+    // 사흘 뒤 다시 알림: 새 메시지를 올리고 먼저 올린 것은 지운다.
+    vi.advanceTimersByTime(3 * 86_400_000);
+    expect(await remind()).toBe(true);
+    expect(mocks.deleteMessage.mock.calls).toEqual([[await sentId(0)]]);
+
+    // "확인함"을 누르면 회색으로 바뀌고 멘션과 버튼 줄이 사라진다. 이후 다시 알림은 보내지 않는다.
+    const update = vi.fn();
+    await acknowledgeProblem({ message: { id: await sentId(1), ...first }, update } as never);
+    expect(update.mock.calls[0]![0]).toMatchObject({ content: null, components: [first.components[0]] });
+    expect(update.mock.calls[0]![0].embeds[0].toJSON()).toMatchObject({
+      color: 0x95a5a6,
+      fields: expect.arrayContaining([{ name: "확인함", value: expect.stringContaining("다시 알리지 않습니다") }]),
+    });
+    vi.advanceTimersByTime(3 * 86_400_000);
+    expect(await remind()).toBe(false);
+    expect(mocks.alertsSend).toHaveBeenCalledTimes(2);
+
+    // 닫는 알림은 확인한 문제에도 그대로 적용된다.
+    const edit = vi.fn();
+    mocks.fetchMessage.mockResolvedValueOnce({ ...first, edit });
+    expect(
+      await handleInstagramEvent(
+        normalizeInstagramEvent({ ...watchdogPayload, alert_level: "outage_resolved", source_key: "ack:outage" })!,
+      ),
+    ).toBe(true);
+    expect(edit.mock.calls[0]![0].embeds[0].toJSON().title).toBe("야있날 게시 재개");
+    vi.useRealTimers();
   });
 
   it("posts the closing alert as a new message when the first one is gone", async () => {

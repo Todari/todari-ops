@@ -257,7 +257,7 @@ class InstagramWatchdogTest(unittest.TestCase):
             job(2, "market_term_explainer", True)  # 다른 유형의 게시가 연속을 끊지 않는다.
             state: dict = {}
             sent: list[dict] = []
-            results = iter([True, True, False, True, True])
+            results = iter([True, True, True, False, True, True])
 
             def capture(_env_path, payload):
                 ok = next(results)
@@ -283,6 +283,19 @@ class InstagramWatchdogTest(unittest.TestCase):
                     (sent[1]["alert_level"], sent[1]["source_key"]), ("outage_closed", sent[0]["source_key"])
                 )
                 del sent[1]
+                state["_publish_outage"] = stale
+                # 열려 있는 채 사흘이 지나면 같은 키로 한 번 다시 알린다(그사이 새 미게시가 이어진 경우).
+                job(5, "close_explainer", False)
+                job(6, "close_explainer", False)
+                later = base + timedelta(days=6, hours=3)
+                watchdog.check_publish_outage(state, later, ledger)
+                watchdog.check_publish_outage(state, later + timedelta(minutes=15), ledger)
+                self.assertEqual(
+                    (len(sent), sent[1]["alert_level"], sent[1]["source_key"], sent[1]["error_message"]),
+                    (2, "outage", sent[0]["source_key"], "jujinmo close_explainer 아직 게시 중단 — 3일째, 연속 5건 미게시"),
+                )
+                del sent[1]
+                ledger.connection.execute("DELETE FROM jobs WHERE job_id IN ('jujinmo:close_explainer:5', 'jujinmo:close_explainer:6')")
                 state["_publish_outage"] = stale
                 job(4, "close_explainer", True)
                 now = base + timedelta(days=4, hours=2)

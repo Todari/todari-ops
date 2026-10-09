@@ -1,6 +1,7 @@
 import {
   ActionRowBuilder,
   ButtonBuilder,
+  type ButtonInteraction,
   ButtonStyle,
   EmbedBuilder,
   type MessageCreateOptions,
@@ -13,7 +14,12 @@ import {
   fetchTextChannel,
 } from "../discord/alerts.js";
 import { env } from "../env.js";
-import { getProblemMessage, setProblemMessage, type ProblemMessage } from "./instagram-problems.js";
+import {
+  findProblemKey,
+  getProblemMessage,
+  setProblemMessage,
+  type ProblemMessage,
+} from "./instagram-problems.js";
 
 const ACCOUNTS = {
   jakkuyagu: {
@@ -61,6 +67,7 @@ const ACTION_CHANNEL_LEVELS: ReadonlySet<AlertLevel> = new Set([
   "outage_resolved",
   "outage_closed",
 ]);
+export const ACK_BUTTON_ID = "igack";
 // 문제를 닫는 수준. 같은 문제로 먼저 올린 메시지가 있으면 새로 보내지 않고 그 메시지를 고친다.
 const CLOSING_LEVELS: ReadonlySet<AlertLevel> = new Set(["recovered", "outage_resolved", "outage_closed"]);
 
@@ -360,8 +367,31 @@ function buildFailureMessage(event: InstagramFailureEvent): MessageCreateOptions
   if (alert?.mention) {
     message.content = `<@${env.OWNER_DISCORD_ID}>`;
     message.allowedMentions = { users: [env.OWNER_DISCORD_ID] };
+    // 멘션으로 부른 알림은 "확인함"으로 다시 알림을 끌 수 있다. 버튼은 둘째 줄에 둔다(확인 뒤 이 줄만 뗀다).
+    message.components = [
+      ...(message.components ?? []),
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(ACK_BUTTON_ID).setLabel("확인함").setStyle(ButtonStyle.Secondary),
+      ),
+    ];
   }
   return message;
+}
+
+/** "확인함" 버튼: 메시지를 회색으로 바꾸고 멘션을 지운다. 문제가 닫힐 때까지 같은 문제를 다시 알리지 않는다. */
+export async function acknowledgeProblem(interaction: ButtonInteraction): Promise<void> {
+  const key = findProblemKey(interaction.message.id);
+  const problem = key ? getProblemMessage(key) : undefined;
+  if (key && problem) setProblemMessage(key, { ...problem, acked: true });
+  const embed = EmbedBuilder.from(interaction.message.embeds[0]).setColor(0x95a5a6).addFields({
+    name: "확인함",
+    value: `<t:${Math.floor(Date.now() / 1000)}:f> · 다시 알리지 않습니다. 해결되면 이 메시지가 바뀝니다.`,
+  });
+  await interaction.update({
+    content: null,
+    embeds: [embed],
+    components: interaction.message.components.slice(0, 1),
+  });
 }
 
 /** 같은 게시기의 네트워크 재시도는 한 번만 Discord에 표시한다. */
@@ -389,6 +419,8 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
     event.status === "failed" && level && event.sourceKey ? `${event.account}:${event.sourceKey}` : null;
   const closing = !!level && CLOSING_LEVELS.has(level);
   const prior = problemKey ? getProblemMessage(problemKey) : undefined;
+  // 확인한 문제의 다시 알림(중단 지속 등)은 보내지 않는다. 닫는 알림은 그대로 받는다.
+  if (prior?.acked && !closing) return false;
   const edited =
     event.status === "failed" && level && closing && prior
       ? await closeProblemMessage(prior, event, level)
@@ -403,6 +435,11 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
     if (!channel) throw new Error("Instagram Discord channel unavailable");
     const sent = await channel.send(buildInstagramMessage(event));
     if (problemKey && !closing) {
+      // 같은 채널에 다시 알릴 때는 먼저 올린 메시지를 지운다(끌어올리기). 문제당 메시지는 하나로 남는다.
+      if (prior?.channelId === sent.channelId) {
+        const old = await fetchTextChannel(prior.channelId, "instagram-problem");
+        await old?.messages.delete(prior.messageId).catch(() => {});
+      }
       setProblemMessage(problemKey, { channelId: sent.channelId, messageId: sent.id, at: now });
     }
   }
@@ -431,7 +468,7 @@ async function closeProblemMessage(
       .setTitle(`${ACCOUNTS[event.account].displayName} ${alert.title}`)
       .addFields({ name: "닫힘", value: `<t:${closedAt}:f> · ${truncate(event.errorMessage, 900)}` });
     // 수정은 푸시를 만들지 않는다. 처음 알림의 멘션은 지운다.
-    await message.edit({ content: null, embeds: [embed] });
+    await message.edit({ content: null, embeds: [embed], components: message.components.slice(0, 1) });
     return true;
   } catch (err) {
     console.warn("[instagram] problem message edit failed — sending a new one:", err);
