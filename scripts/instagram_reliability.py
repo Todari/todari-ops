@@ -369,6 +369,20 @@ class ReliabilityLedger:
                 streaks[key] = (count + 1, None, newest)
         return streaks
 
+    def unpublished_errors(self, account: str, content_type: str, limit: int) -> list[str]:
+        """가장 최근 미게시 작업 limit건의 마지막 복구 오류. 시도한 적이 없으면 빈 문자열."""
+        return [
+            row[0] or ""
+            for row in self.connection.execute(
+                """
+                SELECT last_error FROM jobs
+                WHERE account=? AND content_type=? AND status IN ('missing', 'recovering', 'operator_required')
+                ORDER BY datetime(due_at) DESC LIMIT ?
+                """,
+                (account, content_type, limit),
+            )
+        ]
+
     def publish_counts(self, first_day: str, last_day: str) -> list[tuple[str, str, int, int]]:
         """예정일(KST)이 first_day~last_day인 작업의 계정·유형별 (게시, 전체). 취소는 뺀다."""
         return [

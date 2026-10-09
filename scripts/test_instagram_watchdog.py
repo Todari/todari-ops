@@ -270,6 +270,12 @@ class InstagramWatchdogTest(unittest.TestCase):
                 watchdog.check_publish_outage(state, now, ledger)
                 self.assertEqual(sent, [])  # 2건 연속은 아직 경보가 아니다.
                 job(3, "close_explainer", False)
+                # 시각·ID만 다른 같은 사유는 한 가지로 묶인다.
+                for day, stamp in ((1, "2026-10-06T16:01:02+09:00"), (2, "2026-10-07T16:03:04+09:00")):
+                    ledger.connection.execute(
+                        "UPDATE jobs SET last_error=? WHERE job_id=?",
+                        (f"exit=1: [{stamp}] 검수 거절: 20261007{day}KRX", f"jujinmo:close_explainer:{day}"),
+                    )
                 now = base + timedelta(days=3, hours=2)
                 watchdog.check_publish_outage(state, now, ledger)
                 watchdog.check_publish_outage(state, now, ledger)  # 열려 있는 동안 다시 보내지 않는다.
@@ -292,7 +298,11 @@ class InstagramWatchdogTest(unittest.TestCase):
                 watchdog.check_publish_outage(state, later + timedelta(minutes=15), ledger)
                 self.assertEqual(
                     (len(sent), sent[1]["alert_level"], sent[1]["source_key"], sent[1]["error_message"]),
-                    (2, "outage", sent[0]["source_key"], "jujinmo close_explainer 아직 게시 중단 — 3일째, 연속 5건 미게시"),
+                    (
+                        2, "outage", sent[0]["source_key"],
+                        "jujinmo close_explainer 아직 게시 중단 — 3일째, 연속 5건 미게시"
+                        " · 주된 사유: 복구 시도 기록 없음(3건), exit=1: 검수 거절: …(2건)",
+                    ),
                 )
                 del sent[1]
                 ledger.connection.execute("DELETE FROM jobs WHERE job_id IN ('jujinmo:close_explainer:5', 'jujinmo:close_explainer:6')")
@@ -305,7 +315,11 @@ class InstagramWatchdogTest(unittest.TestCase):
             ledger.close()
 
         self.assertEqual([p["alert_level"] for p in sent], ["outage", "outage_resolved"])
-        self.assertEqual(sent[0]["error_message"], "jujinmo close_explainer 최근 3건 연속 미게시 — 마지막 게시 2026-10-05")
+        self.assertEqual(
+            sent[0]["error_message"],
+            "jujinmo close_explainer 최근 3건 연속 미게시 — 마지막 게시 2026-10-05"
+            " · 주된 사유: exit=1: 검수 거절: …(2건), 복구 시도 기록 없음(1건)",
+        )
         self.assertEqual(sent[0]["source_key"], sent[1]["source_key"])
         self.assertEqual(state["_publish_outage"], {})
         self.assertEqual(

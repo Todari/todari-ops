@@ -18,6 +18,7 @@ import hmac
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -1025,6 +1026,20 @@ def weekly_digest_once(
         print(f"주간 다이제스트 발송: {week_key}")
 
 
+def _outage_reasons(ledger: ReliabilityLedger, account: str, content_type: str, streak: int) -> str:
+    """연속 미게시 작업들의 주된 실패 사유 두 가지. 경보만 보고도 어디를 볼지 알 수 있게 한다.
+
+    ponytail: 사유 문구에서 시각과 긴 숫자 ID만 지워 묶는다. 문구가 조금씩 다른 같은 원인은 따로 세진다.
+    """
+    counts: dict[str, int] = {}
+    for error in ledger.unpublished_errors(account, content_type, streak):
+        text = re.sub(r"\[\d{4}-\d{2}-\d{2}T[^\]]*\]\s*", "", error)
+        text = re.sub(r"\d{6,}\w*", "…", text).strip()[:70] or "복구 시도 기록 없음"
+        counts[text] = counts.get(text, 0) + 1
+    top = sorted(counts.items(), key=lambda item: -item[1])[:2]
+    return " · 주된 사유: " + ", ".join(f"{text}({count}건)" for text, count in top) if top else ""
+
+
 def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) -> None:
     """한 계정의 한 유형이 연속으로 미게시이면 한 번 알리고, 게시가 재개되면 한 번 닫는다.
 
@@ -1046,7 +1061,10 @@ def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) 
         if streak >= OUTAGE_STREAK and not opened:
             started = now.isoformat(timespec="minutes")
             since = f"마지막 게시 {last_published[:10]}" if last_published else "게시 기록 없음"
-            message = f"{name} 최근 {streak}건 연속 미게시 — {since}"
+            message = (
+                f"{name} 최근 {streak}건 연속 미게시 — {since}"
+                + _outage_reasons(ledger, account, content_type, streak)
+            )
             print(f"게시 중단 경보: {message}")
             if _notify(account, content_type, f"outage:{name}:{started}", message, "outage"):
                 open_outages[name] = {"since": started, "streak": streak}
@@ -1061,7 +1079,10 @@ def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) 
             last = datetime.fromisoformat(opened.get("reminded") or opened["since"])
             if now - last >= OUTAGE_REMIND_EVERY:
                 days = (now - datetime.fromisoformat(opened["since"])).days
-                message = f"{name} 아직 게시 중단 — {days}일째, 연속 {streak}건 미게시"
+                message = (
+                    f"{name} 아직 게시 중단 — {days}일째, 연속 {streak}건 미게시"
+                    + _outage_reasons(ledger, account, content_type, streak)
+                )
                 if _notify(account, content_type, f"outage:{name}:{opened['since']}", message, "outage"):
                     opened["reminded"] = now.isoformat(timespec="minutes")
                     print(f"게시 중단 다시 알림: {message}")
