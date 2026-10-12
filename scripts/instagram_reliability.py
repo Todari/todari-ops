@@ -484,7 +484,9 @@ class ReliabilityLedger:
         """주간 알림 수와 실제 미게시·정책 취소 job 수를 집계한다."""
         start, end = _timestamp(since), _timestamp(until)
         alerts = self.connection.execute(
-            "SELECT COUNT(*) FROM alert_events WHERE sent_at>=? AND sent_at<?",
+            # 미게시 종료(final_expired)는 메시지를 닫는 기록이지 새 알림이 아니다. 오래된 행을 알림 없이
+            # 한꺼번에 정리한 주에 알림 수가 부풀지 않게 뺀다.
+            "SELECT COUNT(*) FROM alert_events WHERE sent_at>=? AND sent_at<? AND stage!='final_expired'",
             (start, end),
         ).fetchone()[0]
         actual_missing = self.connection.execute(

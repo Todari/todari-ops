@@ -322,6 +322,27 @@ class ReliabilityLedgerTest(unittest.TestCase):
         self.assertEqual(statuses, {"missing", "recovering"})
         self.assertEqual(earlier, [legacy])
 
+    def test_weekly_alert_count_ignores_expiry_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            now = datetime(2026, 9, 7, 1, 0, tzinfo=UTC)
+            job_id = "jujinmo:premarket:2026-09-07"
+            ledger.sync(
+                job_id=job_id,
+                account="jujinmo",
+                content_type="premarket_hypothesis",
+                source_key="2026-09-07",
+                expected_at=now - timedelta(hours=2),
+                due_at=now - timedelta(hours=1),
+                published=False,
+                now=now,
+            )
+            ledger.record_alert(job_id, "initial", now=now)
+            ledger.record_alert(job_id, "final_expired", now=now + timedelta(hours=7))
+            summary = ledger.weekly_alert_summary(now - timedelta(days=1), now + timedelta(days=1))
+            self.assertEqual(summary["alerts"], 1)
+            ledger.close()
+
 
 if __name__ == "__main__":
     unittest.main()
