@@ -383,6 +383,42 @@ describe("morning digest", () => {
     expect(fields(second.embeds[0]!)).toHaveLength(fields(digest.embeds[0]!).length + 1);
   });
 
+  it("keeps the picks already done when the owner picks again and replaces only the open ones", async () => {
+    const { digest, options } = await aDayWithPicks(); // 관납료 납부 · 알림 버튼 실사용 확인 · 배포 키 구성
+    const evening = await boot(kst("21:30"));
+    await evening.postCheckinPrompt();
+    const prompt = received(lastSent());
+    await click(buttons(prompt.message.components)[4]![1]!.id, prompt).press(evening.handleButton); // ✅ 2
+    const value = (label: string) => options.find((option) => option.label === label)!.value;
+    const target = received(digest);
+    const repick = async (labels: string[]) => {
+      const picking = choose(menu(digest).custom_id, labels.map(value), target.message);
+      await picking.pick(evening.handleSelect);
+      target.apply(picking.interaction.update.mock.calls[0]?.[0] as { embeds: EmbedBuilder[] });
+      return picked(target.message.embeds[0]!)[0];
+    };
+
+    // 끝낸 것과 남겨 둘 것 하나, 새 것 하나를 고른다: 끝낸 것은 한 번만, 맨 앞에 남는다.
+    expect(await repick(["스토어 심사 제출", "알림 버튼 실사용 확인", "관납료 납부"])).toBe(
+      "1. ✅ **todari-ops** · 알림 버튼 실사용 확인\n2. **HGT** · 스토어 심사 제출 (📅 10-30)\n3. **이정표** · 관납료 납부 (📅 10-05)",
+    );
+    // 끝낸 것을 빼고 셋을 새로 골라도 끝낸 것은 그날의 기록에 남는다.
+    expect(await repick(["주간 요약 다듬기", "사업계획서 제출", "배포 키 구성"])).toBe([
+      "1. ✅ **todari-ops** · 알림 버튼 실사용 확인", "2. **todari-ops** · 주간 요약 다듬기 (📅 10-14)",
+      "3. **이정표** · 사업계획서 제출 (📅 10-19)", "4. **HGT** · 배포 키 구성",
+    ].join("\n"));
+
+    // 체크인의 완료 버튼은 아직 하지 않은 것에만, 많아야 셋이다. 번호는 칸의 번호다.
+    await evening.postCheckinPrompt();
+    expect(buttons(lastSent().components).at(-1)?.map((button) => button.label)).toEqual(["✅ 2", "✅ 3", "✅ 4"]);
+    const night = await boot(kst("00:40", "2026-10-13"));
+    await night.writeDailyLog("2026-10-12");
+    expect(mocks.write.mock.calls[0]?.[1]).toBe([
+      "### 오늘의 3개", "- ✅ todari-ops · 알림 버튼 실사용 확인", "- ⬜ todari-ops · 주간 요약 다듬기",
+      "- ⬜ 이정표 · 사업계획서 제출", "- ⬜ HGT · 배포 키 구성",
+    ].join("\n"));
+  });
+
   it("regenerates the candidates on a manual /digest but keeps and shows the picks", async () => {
     await aDayWithPicks();
     // 낮에 볼트가 다시 동기화됐다: 새 할 일이 생기고 고른 것 하나는 후보에서 사라졌다.

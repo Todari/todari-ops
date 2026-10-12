@@ -42,7 +42,7 @@ export interface PickOrder {
 interface Day {
   /** 그날 메뉴에 실은 후보. 재시작 뒤에도 고른 값(id)을 할 일로 되돌린다. */
   candidates: TodayTask[];
-  /** 고른 할 일(고른 순서, 최대 3개). */
+  /** 고른 할 일: 끝낸 것들, 그 뒤에 아직 하지 않은 것(고른 순서, 최대 3개). */
   picks: TodayTask[];
 }
 
@@ -194,18 +194,23 @@ function withField(
   return [first, ...embeds.slice(1)];
 }
 
-/** 다이제스트 메뉴(`today:pick:<날짜>`)에서 고른 것을 그날의 3개로 저장하고 메시지에 적는다. 메뉴는 남아 다시 고를 수 있다. */
+/**
+ * 다이제스트 메뉴(`today:pick:<날짜>`)에서 고른 것을 그날의 3개로 저장하고 메시지에 적는다.
+ * 메뉴는 남아 다시 고를 수 있다. 다시 고르면 아직 하지 않은 것만 바뀐다.
+ */
 export async function pickToday(interaction: StringSelectMenuInteraction): Promise<void> {
   // 자정을 넘겨 골라도 그 다이제스트의 날짜로 남는다.
   const date = interaction.customId.split(":")[2] ?? "";
   const saved = update((days) => {
     const day = days[date];
-    // 이미 고른 것은 완료 표시를 잃지 않게 그대로 가져온다.
-    const picks = interaction.values.flatMap(
+    const chosen = interaction.values.flatMap(
       (id) => day?.picks.find((p) => p.id === id) ?? day?.candidates.find((c) => c.id === id) ?? [],
     );
-    if (day && picks.length > 0) day.picks = picks.slice(0, MAX_PICKS);
-    return picks.length > 0;
+    if (!day || chosen.length === 0) return false;
+    // 끝낸 것은 그날 한 일의 기록이다. 다시 골라도 남기고, 아직 하지 않은 것만 새로 고른 것으로 바꾼다.
+    // (새로 고른 것에 끝낸 것이 들어 있으면 이미 남아 있으니 또 넣지 않는다.)
+    day.picks = [...day.picks.filter((p) => p.done), ...chosen.filter((p) => !p.done).slice(0, MAX_PICKS)];
+    return true;
   });
   const field = todayPicksField(date);
   if (!saved || !field) {
