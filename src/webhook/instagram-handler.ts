@@ -62,6 +62,7 @@ const ALERT_LEVELS = {
   outage_resolved: { color: 0x57f287, title: "게시 재개", silent: false, mention: false },
   outage_closed: { color: 0x95a5a6, title: "게시 중단 종료 · 새 예정 없음", silent: true, mention: false },
   skipped: { color: 0x95a5a6, title: "게시 건너뜀", silent: true, mention: false },
+  expired: { color: 0x95a5a6, title: "미게시로 종료", silent: true, mention: false },
 } as const;
 
 type AlertLevel = keyof typeof ALERT_LEVELS;
@@ -85,6 +86,7 @@ const CLOSING_LEVELS: ReadonlySet<AlertLevel> = new Set([
   "outage_resolved",
   "outage_closed",
   "skipped",
+  "expired",
 ]);
 
 export interface InstagramPostEvent {
@@ -529,6 +531,11 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
       ? await closeProblemMessage(prior, event, level)
       : false;
   if (!edited) {
+    if (level === "expired") {
+      // 닫을 메시지가 없으면(기록 없음·삭제됨) 아무것도 올리지 않는다. 없는 알림을 닫는 새 메시지는 쓸모가 없다.
+      if (problemKey && prior) setProblemMessage(problemKey, null);
+      return false;
+    }
     const channel =
       event.status === "digest"
         ? await fetchDigestChannel()
@@ -559,7 +566,7 @@ export async function handleInstagramEvent(event: InstagramEvent): Promise<boole
   return true;
 }
 
-/** 먼저 올린 메시지를 닫힌 상태로 고친다. 고치지 못하면(메시지 삭제 등) false — 호출자가 새로 보낸다. */
+/** 먼저 올린 메시지를 닫힌 상태로 고친다. 고치지 못하면(메시지 삭제 등) false — 호출자가 새로 보낸다(expired는 보내지 않는다). */
 async function closeProblemMessage(
   prior: ProblemMessage,
   event: InstagramFailureEvent,
@@ -579,7 +586,7 @@ async function closeProblemMessage(
     await message.edit({ content: null, embeds: [embed], components: message.components.slice(0, 1) });
     return true;
   } catch (err) {
-    console.warn("[instagram] problem message edit failed — sending a new one:", err);
+    console.warn("[instagram] problem message edit failed:", err);
     return false;
   }
 }

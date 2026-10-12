@@ -481,6 +481,57 @@ describe("watchdog alert levels", () => {
     vi.restoreAllMocks();
   });
 
+  it("closes an expired problem by graying its delay message, and forgets it", async () => {
+    for (const mock of [mocks.send, mocks.fetchMessage]) mock.mockClear();
+    const deliver = (alert_level: string) =>
+      handleInstagramEvent(
+        normalizeInstagramEvent({
+          ...watchdogPayload,
+          alert_level,
+          source_key: "expired:late",
+          error_message: `${alert_level} 문구`,
+        })!,
+      );
+    await deliver("delay");
+    const edit = vi.fn();
+    mocks.fetchMessage.mockResolvedValueOnce({
+      ...buildInstagramMessage(normalizeInstagramEvent({ ...watchdogPayload, alert_level: "delay" })!),
+      edit,
+    });
+
+    expect(await deliver("expired")).toBe(true);
+    // 새 메시지 없이 지연 메시지만 고친다.
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchMessage.mock.calls).toEqual([[(await mocks.send.mock.results[0]!.value).id]]);
+    const closed = edit.mock.calls[0]![0].embeds[0].toJSON();
+    expect(closed).toMatchObject({ title: "야있날 미게시로 종료", color: 0x95a5a6 });
+    expect(closed.fields.at(-1)).toMatchObject({ name: "닫힘", value: expect.stringContaining("expired 문구") });
+
+    // 닫힌 문제는 기록에서 빠진다. 같은 키의 다음 닫는 알림은 고칠 메시지를 찾지 않고 새로 간다.
+    expect(await deliver("recovered")).toBe(true);
+    expect([mocks.fetchMessage.mock.calls.length, mocks.send.mock.calls.length]).toEqual([1, 2]);
+  });
+
+  it("posts nothing for an expired problem that has no message to close", async () => {
+    for (const mock of [mocks.send, mocks.alertsSend, mocks.fetchMessage]) mock.mockClear();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deliver = (alert_level: string, source_key: string) =>
+      handleInstagramEvent(normalizeInstagramEvent({ ...watchdogPayload, alert_level, source_key })!);
+
+    // 봇이 그 문제의 메시지를 모른다(기록 없음): 다른 닫는 알림과 달리 새 메시지를 만들지 않는다.
+    expect(await deliver("expired", "expired:unknown")).toBe(false);
+    expect(mocks.fetchMessage).not.toHaveBeenCalled();
+    // 메시지가 지워졌다: 고치지 못해도 새로 올리지 않는다.
+    await deliver("delay", "expired:gone");
+    mocks.fetchMessage.mockRejectedValueOnce(new Error("Unknown Message"));
+    expect(await deliver("expired", "expired:gone")).toBe(false);
+    expect([mocks.send.mock.calls.length, mocks.alertsSend.mock.calls.length]).toEqual([1, 0]);
+    // 그 문제의 기록은 지운다. 같은 키의 다음 알림이 없는 메시지를 다시 찾지 않는다.
+    await deliver("recovered", "expired:gone");
+    expect(mocks.fetchMessage).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
   it("delivers each alert level of the same job once", async () => {
     mocks.send.mockClear();
     const deliver = (alert_level?: string) =>
@@ -507,6 +558,7 @@ describe("watchdog alert levels", () => {
     ["outage", 0xed4245, "야있날 게시 중단", false, true],
     ["outage_resolved", 0x57f287, "야있날 게시 재개", false, false],
     ["outage_closed", 0x95a5a6, "야있날 게시 중단 종료 · 새 예정 없음", true, false],
+    ["expired", 0x95a5a6, "야있날 미게시로 종료", true, false],
   ] as const)("applies the %s display policy", (alert_level, color, title, silent, mention) => {
     const event = normalizeInstagramEvent({ ...watchdogPayload, alert_level });
     if (!event || event.status !== "failed") throw new Error("expected failure event");

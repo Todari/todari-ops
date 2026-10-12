@@ -257,6 +257,71 @@ class ReliabilityLedgerTest(unittest.TestCase):
             self.assertTrue(ledger.has_final_alert(job_id))
             ledger.close()
 
+    def test_stale_open_alerts_lists_unclosed_delay_alerts_no_check_has_refreshed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = ReliabilityLedger(Path(temporary) / "jobs.sqlite3")
+            seen = datetime(2026, 9, 7, 1, 0, tzinfo=UTC)
+
+            def job(
+                name: str,
+                *,
+                alerted: bool = True,
+                published: bool = False,
+                now: datetime = seen,
+            ) -> str:
+                job_id = f"jakkuyagu:flow:{name}"
+                ledger.sync(
+                    job_id=job_id,
+                    account="jakkuyagu",
+                    content_type="flow",
+                    source_key=name,
+                    expected_at=seen - timedelta(hours=3),
+                    due_at=seen - timedelta(hours=2),
+                    published=published,
+                    now=now,
+                )
+                if alerted:
+                    ledger.record_alert(job_id, "initial", now=now)
+                return job_id
+
+            missing = job("missing")
+            recovering = job("recovering")
+            ledger.defer_recovery(recovering, detail="락 대기", now=seen)
+            job("no-delay-alert", alerted=False)
+            ledger.record_alert(job("already-closed"), "final_expired", now=seen)
+            operator_required = job("operator-required")
+            for _ in range(4):
+                ledger.record_recovery(
+                    operator_required, succeeded=False, detail="복구 실패", now=seen
+                )
+            job("published", published=True)
+            ledger.cancel(job("cancelled"), detail="건너뜀", now=seen)
+            job("still-watched", now=seen + timedelta(hours=1))
+            # 예전 형식의 행: 시각이 KST 표기다. 문자열로는 가장 늦어 보이지만 실제로는 가장 이르다.
+            legacy = job("legacy")
+            ledger.connection.execute(
+                """
+                UPDATE jobs
+                SET updated_at='2026-09-07T09:30:00+09:00',
+                    due_at='2026-09-07T07:30:00+09:00'
+                WHERE job_id=?
+                """,
+                (legacy,),
+            )
+
+            stale = [
+                item["job_id"]
+                for item in ledger.stale_open_alerts(seen + timedelta(minutes=1))
+            ]
+            earlier = [item["job_id"] for item in ledger.stale_open_alerts(seen)]
+            statuses = {ledger.get(job_id)["status"] for job_id in stale}
+            ledger.close()
+
+        # 기한이 늦은 순. 알림이 없거나 이미 닫혔거나, 확인 필요·게시·취소이거나, 그 뒤에 갱신된 작업은 빠진다.
+        self.assertEqual(stale, [missing, recovering, legacy])
+        self.assertEqual(statuses, {"missing", "recovering"})
+        self.assertEqual(earlier, [legacy])
+
 
 if __name__ == "__main__":
     unittest.main()

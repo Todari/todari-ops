@@ -209,6 +209,10 @@ OUTAGE_STREAK = 3
 ACCOUNT_LABELS = {"sector4": "섹터4", "jakkuyagu": "야있날", "jujinmo": "주진모", "gonggu": "공구함"}
 OUTAGE_STALE_AFTER = timedelta(days=3)
 OUTAGE_REMIND_EVERY = timedelta(days=3)
+# 검사가 이만큼 갱신하지 않은 작업은 검사 창을 벗어난 것이다(주진모·공구함은 그날, 야있날은 이틀, 섹터4는 7일).
+EXPIRE_AFTER = timedelta(hours=6)
+EXPIRE_NOTIFY_WITHIN = timedelta(days=7)  # 이보다 오래 방치된 작업은 알림 없이 종료만 기록한다
+EXPIRE_NOTIFY_LIMIT = 10  # 한 실행에 보내는 종료 알림
 # 알림 버튼으로 받는 운영자 요청. 봇은 요청을 쌓아 두기만 하고, 워치독이 가져와 원장에만 반영한다.
 OPERATOR_ACTIONS = ("retry", "skip")
 RETRY_STARTED = "자동 복구를 다시 시작했습니다(최대 4회). 게시되면 이 메시지가 바뀌고, 다시 실패하면 새로 알립니다."
@@ -1115,6 +1119,39 @@ def check_publish_outage(state: dict, now: datetime, ledger: ReliabilityLedger) 
                     print(f"게시 중단 다시 알림: {message}")
 
 
+def expire_stale_jobs(state: dict, ledger: ReliabilityLedger, now: datetime, failed_checks: set[str]) -> None:
+    """검사 창을 벗어나 더는 복구되지 않는 작업의 지연 알림을 닫는다.
+
+    복구 기간이 지나면 검사가 그 작업을 더 보지 않아 "자동 복구 중" 메시지가 닫히지 않고 남았다.
+    작업 상태는 바꾸지 않는다. 게시 실적과 연속 미게시 경보는 missing·recovering을 미게시로 세고
+    취소된 작업은 연속에서 빼므로, 여기서 취소로 닫으면 게시 중단 감지가 조용히 깨진다.
+    """
+    tracked = state.get("_operator")
+    operator = tracked if isinstance(tracked, dict) else {}
+    notified = settled = 0
+    for item in ledger.stale_open_alerts(now - EXPIRE_AFTER):
+        job_id = item["job_id"]
+        # 검사가 실패한 계정은 갱신만 끊긴 것일 수 있다. 운영자가 다시 시도시킨 작업은 요청 결과 처리가 닫는다.
+        if job_id.split(":")[0] in failed_checks or job_id in operator:
+            continue
+        # 기한(due_at)으로 가르면 섹터4 예선처럼 기한 7일 뒤에야 창을 벗어나는 작업이 늘 알림 없이 닫힌다.
+        if now - datetime.fromisoformat(item["updated_at"]) > EXPIRE_NOTIFY_WITHIN:
+            settled += 1
+        elif notified >= EXPIRE_NOTIFY_LIMIT:
+            continue
+        else:
+            notified += 1
+            lines = (item["last_error"] or "").strip().splitlines()
+            reason = lines[0][:120] if lines else "복구 시도 기록 없음"
+            message = f"복구 기간이 지나 미게시로 종료 — {reason}"
+            print(f"경고 발송: {job_id} [final_expired] — {message}")
+            if not _notify(item["account"], item["content_type"], job_id, message, "expired"):
+                continue  # 기록하지 않아 다음 실행에 다시 보낸다.
+        ledger.record_alert(job_id, "final_expired", now=now)
+    if settled:
+        print(f"오래 방치된 미게시 {settled}건: 알림 없이 종료만 기록")
+
+
 def _label(name: str) -> str:
     """'jakkuyagu' 또는 'jakkuyagu game-flow-reel'의 계정 부분을 표시 이름으로 바꾼다."""
     account, _, rest = name.partition(" ")
@@ -1448,6 +1485,10 @@ def main(argv: list[str] | None = None) -> None:
         check_publish_outage(state, now, ledger)
     except Exception as error:  # noqa: BLE001 - 중단 경보 실패가 감시를 막지 않는다
         print(f"warning: 게시 중단 검사 실패 — {type(error).__name__}: {error}")
+    try:
+        expire_stale_jobs(state, ledger, now, failed_checks)
+    except Exception as error:  # noqa: BLE001 - 종료 처리 실패가 생존 신호를 막지 않는다
+        print(f"warning: 미게시 종료 처리 실패 — {type(error).__name__}: {error}")
     # 봇의 /healthz가 이 신호의 신선도를 본다. 크론이 멈추면 외부 감시가 알린다.
     heartbeat = {"status": "heartbeat"}
     try:

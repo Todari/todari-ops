@@ -379,6 +379,31 @@ class ReliabilityLedger:
         self.connection.commit()
         return bool(cursor.rowcount)
 
+    def stale_open_alerts(self, stale_before: datetime) -> list[dict]:
+        """지연 알림(initial)이 닫히지 않은 missing·recovering 작업 중 stale_before 뒤로 갱신이 없는 것. 기한이 늦은 순.
+
+        검사는 창 안의 작업을 볼 때마다 updated_at을 갱신한다. 오래 그대로면 그 작업은 검사 창을 벗어난 것이다.
+        """
+        # 예전에 쓰인 행은 updated_at이 +09:00 표기라 문자열 비교가 틀린다. datetime()이 UTC로 맞춘다.
+        rows = self.connection.execute(
+            """
+            SELECT * FROM jobs
+            WHERE status IN ('missing', 'recovering')
+              AND datetime(updated_at) < datetime(?)
+              AND EXISTS (
+                  SELECT 1 FROM alert_events
+                  WHERE alert_events.job_id=jobs.job_id AND stage='initial'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM alert_events
+                  WHERE alert_events.job_id=jobs.job_id AND stage LIKE 'final_%'
+              )
+            ORDER BY datetime(due_at) DESC, job_id
+            """,
+            (_timestamp(stale_before),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def unpublished_streaks(
         self, now: datetime
     ) -> dict[tuple[str, str], tuple[int, str | None, datetime]]:

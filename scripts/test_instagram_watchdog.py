@@ -1234,6 +1234,166 @@ class InstagramWatchdogTest(unittest.TestCase):
             finally:
                 ledger.close()
 
+    def _delayed_job(self, ledger, job_id, synced):
+        """지연 알림만 나간 미게시 작업. 검사가 synced에 마지막으로 봤다."""
+        account, content_type = job_id.split(":")[:2]
+        ledger.sync(
+            job_id=job_id, account=account, content_type=content_type, source_key=job_id,
+            expected_at=synced - timedelta(hours=2), due_at=synced - timedelta(hours=1),
+            published=False, now=synced,
+        )
+        ledger.record_alert(job_id, "initial", now=synced)
+        return job_id
+
+    def test_job_past_its_recovery_window_is_closed_once_and_stays_unpublished(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            synced = datetime(2026, 9, 7, 23, 45, tzinfo=KST)
+            job_id = self._delayed_job(ledger, "jakkuyagu:flow-reel:game-1", synced)
+            error = "exit=1: " + "검수 거절 " * 40
+            ledger.record_recovery(job_id, succeeded=False, detail=f"{error}\nTraceback (most recent call last):", now=synced)
+            message = "복구 기간이 지나 미게시로 종료 — " + error[:120]
+            try:
+                # 검사가 6시간 안에 본 작업은 아직 검사 창 안에 있다.
+                with patch.object(watchdog, "_notify") as notify:
+                    watchdog.expire_stale_jobs({}, ledger, synced + timedelta(hours=5, minutes=45), set())
+                notify.assert_not_called()
+                # 알림이 봇에 닿지 않으면 기록하지 않고 다음 실행에 다시 보낸다.
+                with patch.object(watchdog, "_notify", return_value=False) as notify:
+                    watchdog.expire_stale_jobs({}, ledger, synced + timedelta(hours=6, minutes=15), set())
+                notify.assert_called_once_with("jakkuyagu", "flow-reel", job_id, message, "expired")
+                self.assertFalse(ledger.has_final_alert(job_id))
+                closed_at = synced + timedelta(hours=6, minutes=30)
+                with patch.object(watchdog, "_notify", return_value=True) as notify:
+                    watchdog.expire_stale_jobs({}, ledger, closed_at, set())
+                    watchdog.expire_stale_jobs({}, ledger, closed_at + timedelta(minutes=15), set())
+                notify.assert_called_once_with("jakkuyagu", "flow-reel", job_id, message, "expired")
+                self.assertEqual(ledger.alert_time(job_id, "final_expired"), closed_at)
+                # 상태는 그대로다. 게시 실적과 연속 미게시 경보가 이 작업을 계속 미게시로 센다.
+                item = ledger.get(job_id)
+                self.assertEqual((item["status"], item["recovery_attempts"]), ("missing", 1))
+                self.assertEqual(ledger.unpublished_streaks(closed_at)[("jakkuyagu", "flow-reel")][0], 1)
+            finally:
+                ledger.close()
+
+    def test_expiry_leaves_jobs_that_have_no_delay_alert_or_are_closed_elsewhere(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            synced = datetime(2026, 9, 7, 23, 45, tzinfo=KST)
+            now = synced + timedelta(hours=7)
+            try:
+                # 지연 알림이 나간 적 없는 작업은 닫을 메시지가 없다.
+                self._missing_job(ledger, "jakkuyagu:flow:unalerted")
+                # 확인 필요·게시·취소는 저마다 닫는 알림이 따로 있다.
+                operator_required = self._delayed_job(ledger, "jakkuyagu:flow:operator-required", synced)
+                for _ in range(4):
+                    ledger.record_recovery(operator_required, succeeded=False, detail="복구 실패", now=synced)
+                published = self._delayed_job(ledger, "jakkuyagu:flow:published", synced)
+                ledger.connection.execute("UPDATE jobs SET status='published' WHERE job_id=?", (published,))
+                ledger.cancel(self._delayed_job(ledger, "jakkuyagu:flow:cancelled", synced), detail="건너뜀", now=synced)
+                # 검사가 실패한 계정의 작업은 갱신만 끊긴 것일 수 있고, 운영자가 다시 시도시킨 작업은 요청 결과 처리가 닫는다.
+                unchecked = self._delayed_job(ledger, "sector4:result:2026-r17", synced)
+                ledger.defer_recovery(unchecked, detail="exit=75: 락 대기\n둘째 줄", now=synced)
+                retried = self._delayed_job(ledger, "jujinmo:close:2026-09-07", synced)
+                state = {"_operator": {retried: {"action": "retry", "at": 1}}}
+
+                with patch.object(watchdog, "_notify", return_value=True) as notify:
+                    watchdog.expire_stale_jobs(state, ledger, now, {"sector4"})
+                    notify.assert_not_called()
+                    self.assertEqual(
+                        ledger.connection.execute("SELECT COUNT(*) FROM alert_events WHERE stage='final_expired'").fetchone()[0],
+                        0,
+                    )
+                    # 검사가 다시 성공하고 요청 추적이 끝나면 그때 닫는다.
+                    watchdog.expire_stale_jobs({}, ledger, now + timedelta(minutes=15), set())
+                # 사유는 마지막 복구 오류의 첫 줄이다.
+                self.assertEqual(
+                    {call.args[2:4] for call in notify.call_args_list},
+                    {
+                        (unchecked, "복구 기간이 지나 미게시로 종료 — exit=75: 락 대기"),
+                        (retried, "복구 기간이 지나 미게시로 종료 — 복구 시도 기록 없음"),
+                    },
+                )
+            finally:
+                ledger.close()
+
+    def test_long_abandoned_jobs_are_settled_silently_and_each_run_notifies_at_most_ten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ReliabilityLedger(Path(directory) / "jobs.sqlite3")
+            now = datetime(2026, 9, 14, 6, 0, tzinfo=KST)
+            try:
+                # 이 정리가 생기기 전부터 쌓인 작업: 7일 넘게 아무 검사도 보지 않았다.
+                abandoned = [
+                    self._delayed_job(ledger, f"jakkuyagu:flow:old-{index}", now - timedelta(days=8 + index))
+                    for index in range(15)
+                ]
+                recent = [
+                    self._delayed_job(ledger, f"jakkuyagu:flow:new-{index}", now - timedelta(hours=7))
+                    for index in range(12)
+                ]
+                # 섹터4 예선은 기한(세션 3시간 뒤)이 지나고도 7일 동안 검사가 본다. 창을 막 벗어난 작업은 기한이 오래돼도 알린다.
+                session = now - timedelta(days=7, hours=6, minutes=10)
+                ledger.sync(
+                    job_id="sector4:quali:2026-r17", account="sector4", content_type="quali", source_key="quali-2026-r17",
+                    expected_at=session + timedelta(hours=2), due_at=session + timedelta(hours=3),
+                    published=False, now=session + timedelta(days=7) - timedelta(minutes=5),
+                )
+                ledger.record_alert("sector4:quali:2026-r17", "initial", now=session + timedelta(hours=3))
+
+                def closed(job_ids):
+                    return sum(ledger.alert_time(job_id, "final_expired") is not None for job_id in job_ids)
+
+                with patch.object(watchdog, "_notify", return_value=True) as notify:
+                    watchdog.expire_stale_jobs({}, ledger, now, set())
+                    self.assertEqual((notify.call_count, closed(abandoned), closed(recent)), (10, 15, 10))
+                    watchdog.expire_stale_jobs({}, ledger, now + timedelta(minutes=15), set())
+                    watchdog.expire_stale_jobs({}, ledger, now + timedelta(minutes=30), set())
+                self.assertEqual((notify.call_count, closed(recent)), (13, 12))
+                notified = [call.args[2] for call in notify.call_args_list]
+                self.assertEqual(len(set(notified)), 13)
+                self.assertFalse(set(notified) & set(abandoned))
+                self.assertIn("sector4:quali:2026-r17", notified)
+                self.assertEqual(
+                    notify.call_args.args[3:], ("복구 기간이 지나 미게시로 종료 — 복구 시도 기록 없음", "expired")
+                )
+                self.assertEqual({ledger.get(job_id)["status"] for job_id in abandoned + recent}, {"missing"})
+            finally:
+                ledger.close()
+
+    def test_main_sweeps_expired_jobs_after_the_checks_and_still_sends_the_heartbeat_if_it_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sent: list[dict] = []
+            sweeps: list[tuple] = []
+
+            def capture(_env_path, payload):
+                sent.append(payload)
+                return True, "ok"
+
+            def sweep(_state, _ledger, _now, failed_checks):
+                sweeps.append((set(failed_checks), len(sent)))
+                raise RuntimeError("원장 잠김")
+
+            with (
+                patch.object(watchdog, "HOME", root),
+                patch.object(watchdog, "STATE_PATH", root / "state.json"),
+                patch.object(watchdog, "LEDGER_PATH", root / "jobs.sqlite3"),
+                patch.object(watchdog, "_signed_post", return_value="ConnectionError"),
+                patch.object(watchdog, "_post_signed_payload", side_effect=capture),
+                patch.object(watchdog, "check_jujinmo"),
+                patch.object(watchdog, "check_jakkuyagu"),
+                patch.object(watchdog, "check_sector4", side_effect=RuntimeError("일정 조회 실패")),
+                patch.object(watchdog, "check_gonggu"),
+                patch.object(watchdog, "collect_portfolio_once"),
+                patch.object(watchdog, "weekly_digest_once"),
+                patch.object(watchdog, "expire_stale_jobs", side_effect=sweep),
+            ):
+                watchdog.main([])
+
+        # 모든 검사 뒤(실패한 계정을 안다), 생존 신호 앞에서 한 번 돈다.
+        self.assertEqual(sweeps, [({"sector4"}, 0)])
+        self.assertEqual([payload["status"] for payload in sent], ["heartbeat"])
+
 
 if __name__ == "__main__":
     unittest.main()
