@@ -272,7 +272,8 @@ async function handleSessions(interaction: ChatInputCommandInteraction): Promise
 }
 
 function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+  // 이모지가 경계에서 반으로 잘리면 Discord가 메시지를 통째로 거부한다. 잘린 앞 절반은 뺀다.
+  return s.length > n ? s.slice(0, n - 1).replace(/[\uD800-\uDBFF]$/, "") + "…" : s;
 }
 
 async function handleJp(interaction: ChatInputCommandInteraction): Promise<void> {
