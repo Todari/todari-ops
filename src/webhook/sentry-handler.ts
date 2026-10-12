@@ -99,7 +99,7 @@ export async function handleSentryEvent(slug: string, payload: unknown): Promise
         const issueKeys = issue ? Object.keys(issue).join(", ") : "(no issue)";
         // Discord embed field value max = 1024. Keep JSON well under.
         const cap = (s: string, n: number) =>
-          s.length > n ? s.slice(0, n - 4) + "…" : s;
+          s.length > n ? s.slice(0, n - 4).replace(/[\uD800-\uDBFF]$/, "") + "…" : s;
         const issueJson = cap(JSON.stringify(issue ?? null, null, 2), 900);
         const issueTags = cap(JSON.stringify((issue as { tags?: unknown })?.tags ?? null), 900);
         const issueMetadata = cap(

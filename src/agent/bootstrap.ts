@@ -21,7 +21,7 @@ export async function spawnSessionThread(args: {
   sourceTask?: VaultTaskRef;
 }): Promise<ThreadChannel> {
   const thread = await args.parent.threads.create({
-    name: args.threadName.length > 100 ? args.threadName.slice(0, 99) + "…" : args.threadName,
+    name: args.threadName.length > 100 ? args.threadName.slice(0, 99).replace(/[\uD800-\uDBFF]$/, "") + "…" : args.threadName,
     autoArchiveDuration: ThreadAutoArchiveDuration.OneHour,
     type: ChannelType.PublicThread,
   });

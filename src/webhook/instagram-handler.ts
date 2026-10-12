@@ -768,5 +768,5 @@ function failureCategoryLabel(value: string): string {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+  return value.length <= max ? value : `${value.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
 }
