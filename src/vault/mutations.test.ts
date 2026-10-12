@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, type SpawnOptions } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,8 +6,25 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   env: { WORK_DIR: "", GITHUB_TOKEN: "", VAULT_REPO_URL: "", CLAUDE_MODEL: "" },
+  /** 봇이 git 을 띄울 때마다 건 제한 시간. */
+  timeouts: [] as Array<number | undefined>,
+  /** 이 하위 명령을 다음에 한 번, 응답 없는 원격처럼 끝나지 않게 한다. */
+  hangOn: "",
 }));
 vi.mock("../env.js", () => ({ env: mocks.env }));
+// 실제 git 을 그대로 띄운다. 지목한 명령만 끝나지 않는 프로세스로 바꾸고, 봇이 건 제한 시간을 기다릴 수 있는 길이로 줄인다.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawn: (command: string, args: string[], options: SpawnOptions) => {
+      mocks.timeouts.push(options.timeout);
+      if (!mocks.hangOn || !args.includes(mocks.hangOn)) return actual.spawn(command, args, options);
+      mocks.hangOn = "";
+      return actual.spawn("sleep", ["5"], { ...options, timeout: options.timeout && 300 });
+    },
+  };
+});
 vi.mock("../observability/sentry.js", () => ({ captureException: vi.fn() }));
 import { isAllowedVaultMarkdownPath, listVaultNotesAdded, writeVaultDailyLog } from "./mutations.js";
 
@@ -113,6 +130,18 @@ describe("daily log in the vault checkout", { timeout: 30_000 }, () => {
       "공부/TIL/git 날짜.md",
       "이정표/의사결정/2026-10-11 가격 정책.md",
     ]);
+  });
+
+  it.each(["pull", "log"])("gives up on a git %s that never answers and lets the next request through", async (hung) => {
+    mocks.timeouts.length = 0;
+    mocks.hangOn = hung;
+    const stuck = listVaultNotesAdded(DAY.start, DAY.end);
+    const next = listVaultNotesAdded(DAY.start, DAY.end); // 같은 큐에서 앞의 것이 끝나기를 기다린다
+    await expect(stuck).rejects.toThrow("stopped by SIGTERM");
+    expect(await next).toHaveLength(2);
+    // 볼트 checkout 의 git 호출에는 pull 이든 그 뒤의 명령이든 60초 제한이 걸려 있다.
+    expect(mocks.timeouts.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(mocks.timeouts)).toEqual(new Set([60_000]));
   });
 
   it("creates the note, then replaces only its own section after the owner edits it", async () => {

@@ -22,7 +22,7 @@ import {
   setTaskDue,
   upsertAutoLog,
 } from "./editor.js";
-import { ensureVaultCheckout } from "./repo.js";
+import { ensureVaultCheckout, VAULT_GIT_TIMEOUT_MS } from "./repo.js";
 import { todayKst } from "./state.js";
 
 export type VaultCaptureKind = "task" | "idea" | "note";
@@ -541,6 +541,10 @@ function git(dir: string, args: string[]): Promise<string> {
       cwd: dir,
       env: githubAuthEnv(),
       stdio: ["ignore", "pipe", "pipe"],
+      // 응답 없는 push·pull 이 볼트 큐를 붙잡지 않게 한다. 넘기면 SIGTERM 으로 끝나 아래에서 거절된다.
+      // ponytail: git 본체만 끝낸다 — git 이 띄운 원격 도우미는 연결이 끊길 때까지 남을 수 있다.
+      // 그런 프로세스가 쌓이면 detached 로 띄워 프로세스 그룹째 끝내도록 바꾼다.
+      timeout: VAULT_GIT_TIMEOUT_MS,
     });
     let stdout = "";
     let stderr = "";
@@ -553,9 +557,12 @@ function git(dir: string, args: string[]): Promise<string> {
       stderr += chunk;
     });
     child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (code === 0) resolve(stdout);
-      else reject(new Error(`git ${args[0]} exited ${code}: ${stderr.trim()}`));
+      else {
+        const why = signal ? `stopped by ${signal} (time limit ${VAULT_GIT_TIMEOUT_MS / 1000}s)` : `exited ${code}`;
+        reject(new Error(`git ${args[0]} ${why}: ${stderr.trim()}`));
+      }
     });
   });
 }
