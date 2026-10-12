@@ -226,11 +226,12 @@ describe("morning digest", () => {
       "사업계획서 제출 | 이정표 · 📅 10-19",
       "배포 키 구성 | HGT",
       "알림 버튼 실사용 확인 | todari-ops",
-      `${LONG.slice(0, 99)}… | 인스타 실험실`, // 라벨은 100자에서 잘린다
+      `${LONG.slice(0, 100)} | 인스타 실험실 · …${LONG.slice(100).trim()}`, // 라벨에 다 들어가지 않은 문장은 설명에서 이어진다
       "스토어 심사 제출 | HGT · 📅 10-30",
       // 보류한 "셋째 할 일"은 후보가 아니다
     ]);
     expect(menu(digest).options.every((option) => option.label.length <= 100)).toBe(true);
+    expect(menu(digest).options.every((option) => (option.description ?? "").length <= 100)).toBe(true);
     // 기존 "▶ /code 세션으로 시작" 버튼 줄은 그대로다(카탈로그 프로젝트의 할 일, 마감 순 3개).
     expect(buttons(digest.components.slice(1))[0]?.map((button) => button.label)).toEqual([
       "▶ jeongpyo: 관납료 납부", "▶ todari-ops: 주간 요약 다듬기", "▶ jeongpyo: 사업계획서 제출",
@@ -294,7 +295,7 @@ describe("morning digest", () => {
     expect(menu(lastSent()).options.map((option) => option.label).slice(3, 6)).toEqual([
       "알림 버튼 실사용 확인", // todari-ops: 사흘 동안 커밋이 가장 많다 (이정표의 첫 할 일은 이미 마감 순에 있다)
       "배포 키 구성",
-      LONG.slice(0, 99) + "…",
+      LONG.slice(0, 100),
     ]);
   });
 
@@ -317,6 +318,29 @@ describe("morning digest", () => {
     );
     await (await boot(kst("08:40"))).postDigest();
     expect(menu(lastSent()).options.map((option) => option.label)).toEqual(plain);
+  });
+
+  it("continues a task longer than the label in the description, after the note name and the date", async () => {
+    const emoji = `${"나".repeat(99)}🎯${"가".repeat(150)}`; // 100번째 글자가 이모지(서로게이트 쌍)다
+    seedVault([{
+      note: "인스타 실험실",
+      tasks: [{ text: LONG }, { text: emoji, due: "2026-10-30" }, { text: "다".repeat(100) }, { text: `${"라".repeat(100)} 마` }],
+    }]);
+    const { postDigest } = await boot(kst("08:30"));
+    await postDigest();
+
+    const [long, dated, exact, spaced] = menu(lastSent()).options;
+    expect(long!.label + long!.description).toBe(`${LONG.slice(0, 100)}인스타 실험실 · …${LONG.slice(100).trim()}`);
+    expect(long!.description).toMatch(/좁힌다 끝$/); // 문장의 끝까지 보인다
+    // 이모지는 반으로 자르지 않고 통째로 넘긴다. 날짜는 그대로 있고, 설명도 100자를 넘으면 거기서 끊는다.
+    expect(dated!.label).toBe("나".repeat(99));
+    expect(dated!.description).toBe(`${`인스타 실험실 · 📅 10-30 · …🎯${"가".repeat(150)}`.slice(0, 99)}…`);
+    expect(exact).toMatchObject({ label: "다".repeat(100), description: "인스타 실험실" }); // 꼭 100자면 넘치지 않는다
+    expect(spaced).toMatchObject({ label: "라".repeat(100), description: "인스타 실험실 · …마" });
+    for (const option of menu(lastSent()).options) {
+      expect(option.label.length).toBeLessThanOrEqual(100);
+      expect(option.description!.length).toBeLessThanOrEqual(100);
+    }
   });
 
   it("has no menu without a vault snapshot and caps the picks at the number of candidates", async () => {

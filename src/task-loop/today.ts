@@ -49,6 +49,7 @@ interface Day {
 const FILE = path.resolve(env.WORK_DIR, "..", "today-picks.json");
 const FIELD = "🎯 오늘의 3개";
 const MAX_OPTIONS = 25; // Discord 선택 메뉴의 한도
+const MAX_OPTION_TEXT = 100; // 메뉴 한 줄의 라벨과 설명 각각의 한도
 const MAX_PICKS = 3;
 const KEEP_DAYS = 7;
 
@@ -134,13 +135,26 @@ export function todayPickMenu(
       .setMaxValues(Math.min(MAX_PICKS, candidates.length))
       .addOptions(
         candidates.map((task) => ({
-          label: clip(task.text, 100),
-          description: clip(`${task.note}${task.due ? ` · 📅 ${task.due.slice(5)}` : ""}`, 100),
+          ...optionText(task),
           value: task.id,
           ...(task.id === preselected ? { default: true } : {}),
         })),
       ),
   );
+}
+
+/**
+ * 메뉴 한 줄의 글. 라벨에는 문장의 앞 100자만 들어가므로, 넘친 뒷부분은 설명에서 노트 이름(과 마감일) 뒤에 잇는다.
+ * 긴 문장으로 적은 할 일도 끝까지 읽고 고르게 하려는 것이다.
+ */
+function optionText(task: TodayTask): { label: string; description: string } {
+  // 이모지(서로게이트 쌍)를 반으로 자르면 Discord 가 요청을 거부한다. 걸친 글자는 통째로 설명으로 넘긴다.
+  const cut = /[\uD800-\uDBFF]/.test(task.text.charAt(MAX_OPTION_TEXT - 1))
+    ? MAX_OPTION_TEXT - 1
+    : MAX_OPTION_TEXT;
+  const rest = task.text.slice(cut).trim();
+  const parts = [task.note, ...(task.due ? [`📅 ${task.due.slice(5)}`] : []), ...(rest ? [`…${rest}`] : [])];
+  return { label: task.text.slice(0, cut).trim(), description: clip(parts.join(" · "), MAX_OPTION_TEXT) };
 }
 
 /** 임베드의 "🎯 오늘의 3개" 칸: 고른 순서대로 번호를 붙이고 끝낸 것은 ✅. 고른 것이 없으면 null. */
