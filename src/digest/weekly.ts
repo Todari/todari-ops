@@ -3,7 +3,7 @@ import { projects, repoFullName } from "../projects.js";
 import { fetchDigestChannel } from "../discord/alerts.js";
 import { ghJson } from "../github/api.js";
 import { eventsSince, type EventKind } from "../stats/events.js";
-import { collectDeadlines, ddayLabel, getVaultState } from "../vault/state.js";
+import { collectDeadlines, daysUntil, ddayLabel, getVaultState } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 import { lastOpenTaskCount, postTidy, recordOpenTaskCount } from "../task-loop/tidy.js";
@@ -100,7 +100,7 @@ export async function postWeekly(scheduled = false): Promise<boolean> {
     const last = lastOpenTaskCount();
     embed.addFields({
       name: "📋 열린 할 일",
-      value: `${open}개${last === undefined ? "" : ` (지난주 ${last}개)`}`,
+      value: `${open}개${last ? ` (${comparedTo(last.date)} ${last.count}개)` : ""}`,
     });
     const next = collectDeadlines(vault, 0, 7);
     if (next.length > 0) {
@@ -125,6 +125,13 @@ export async function postWeekly(scheduled = false): Promise<boolean> {
     captureException(err, { kind: "task-tidy" });
   }
   return true;
+}
+
+// 직전 기록이 한 주쯤 전(6~8일)일 때만 "지난주"라 부른다. 예약 요약을 거른 주가 있거나 주중의
+// 수동 /week 면 무엇과 견준 것인지 그 기록의 날짜로 밝힌다(예: "10/02 기록").
+function comparedTo(date: string): string {
+  const age = -daysUntil(date);
+  return age >= 6 && age <= 8 ? "지난주" : `${date.slice(5).replace("-", "/")} 기록`;
 }
 
 function msUntilFridayKst(hour: number, minute: number): number {

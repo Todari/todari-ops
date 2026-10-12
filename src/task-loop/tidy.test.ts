@@ -458,7 +458,7 @@ describe("open task count in the weekly summary", () => {
     seedVault([FIVE[0]!, { ...FIVE[1]!, tasks: [] }]);
     const midweek = await boot(kst("10:00", "2026-10-21"));
     await midweek.postWeekly();
-    expect(openField(4)).toBe("2개 (지난주 6개)");
+    expect(openField(4)).toBe("2개 (10/16 기록 6개)"); // 닷새 전의 기록은 "지난주"가 아니다
     expect(saved<{ openCounts: object }>("task-tidy.json").openCounts).toEqual({ "2026-10-16": 6 }); // 수동 게시는 남기지 않는다
 
     const nextFriday = await boot(kst("17:59", "2026-10-23"));
@@ -466,6 +466,20 @@ describe("open task count in the weekly summary", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await vi.waitFor(() => expect(openField(6)).toBe("2개 (지난주 6개)"));
     expect(saved<{ openCounts: object }>("task-tidy.json").openCounts).toEqual({ "2026-10-16": 6, "2026-10-23": 2 });
+  });
+
+  it.each([
+    ["2026-10-02", "6개 (10/02 기록 201개)"], // 두 주 전: 지난주의 예약 요약을 걸렀다
+    ["2026-10-07", "6개 (10/07 기록 201개)"], // 9일 전
+    ["2026-10-08", "6개 (지난주 201개)"], // 8일 전
+    ["2026-10-10", "6개 (지난주 201개)"], // 6일 전
+    ["2026-10-11", "6개 (10/11 기록 201개)"], // 5일 전
+  ])("calls the earlier count 지난주 only when it is about a week old, else dates it: %s", async (date, shown) => {
+    seedVault(FIVE);
+    writeFileSync(join(root, "task-tidy.json"), JSON.stringify({ openCounts: { [date]: 201 } }));
+    const { postWeekly } = await boot(kst("18:00"));
+    await postWeekly();
+    expect(openField(0)).toBe(shown);
   });
 
   it("leaves the field out without a vault snapshot", async () => {

@@ -100,12 +100,12 @@ export function withoutSnoozed(vault: VaultState): VaultState {
   };
 }
 
-/** 오늘(KST)보다 앞서 예약 주간 요약이 마지막으로 남긴 열린 할 일 수. 주간 요약의 "지난주 N개". */
-export function lastOpenTaskCount(): number | undefined {
+/** 오늘(KST)보다 앞서 예약 주간 요약이 마지막으로 남긴 열린 할 일 수와 그 날짜. 주간 요약이 견주는 값이다. */
+export function lastOpenTaskCount(): { date: string; count: number } | undefined {
   const { openCounts } = load();
   const today = todayKst();
-  const last = Object.keys(openCounts).filter((date) => date < today).sort().at(-1);
-  return last === undefined ? undefined : openCounts[last];
+  const date = Object.keys(openCounts).filter((d) => d < today).sort().at(-1);
+  return date === undefined ? undefined : { date, count: openCounts[date] };
 }
 
 export function recordOpenTaskCount(count: number): void {
