@@ -52,7 +52,7 @@ type Hub = { note: string; slug?: string; tasks: Array<{ text: string }> };
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const MB = 1024 * 1024;
-const AUDIO_URL = "https://cdn.discordapp.test/attachments/11/22/voice-message.ogg";
+const AUDIO_URL = "https://cdn.discordapp.com/attachments/11/22/voice-message.ogg";
 const AUDIO = new Uint8Array([79, 103, 103, 83, 0, 2, 7, 9]);
 const GEMINI = "https://generativelanguage.googleapis.com/v1beta/models/gemini-test-model:generateContent";
 const SAID = "음 그러니까 엘브이티아이 결과 화면에 공유 버튼을 달아야 돼";
@@ -358,6 +358,99 @@ describe("when voice capture cannot run", () => {
   });
 });
 
+describe("downloading the audio", () => {
+  const TOO_LARGE = "⚠️ 받아쓰지 못했습니다 — 음성 파일이 10MB 를 넘음. 음성 메시지는 그대로 있으니 다시 보내 주세요.";
+
+  it.each([
+    ["another host", "https://files.example.test/attachments/11/22/voice-message.ogg"],
+    ["a look-alike host", "https://cdn.discordapp.com.example.test/attachments/11/22/voice-message.ogg"],
+    ["a host named in the credentials", "https://cdn.discordapp.com@example.test/attachments/11/22/voice-message.ogg"],
+    ["plain http", "http://cdn.discordapp.com/attachments/11/22/voice-message.ogg"],
+  ])("does not fetch an attachment from %s", async (_what, url) => {
+    const { handleVoiceMessage } = await boot();
+    const voice = voiceMessage({ files: [ogg({ url })] });
+    expect(await voice.send(handleVoiceMessage)).toBe(true);
+
+    expect(voice.replies().map((r) => r.content)).toEqual(["🎙️ 이 첨부는 읽을 수 없습니다 — Discord 에 올린 파일만 받습니다."]);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(pending()).toEqual([]);
+    expect(voice.untouched()).toBe(true);
+  });
+
+  it("fetches from Discord's media host too, and never follows a redirect", async () => {
+    const url = "https://media.discordapp.net/attachments/11/22/voice-message.ogg";
+    mocks.fetch.mockImplementation(async (asked: string) => (asked === url ? new Response(AUDIO) : gemini(ANSWER)));
+    const { handleVoiceMessage } = await boot();
+    const voice = voiceMessage({ files: [ogg({ url })] });
+    await voice.send(handleVoiceMessage);
+
+    expect(mocks.fetch.mock.calls[0]).toEqual([url, { signal: expect.any(AbortSignal), redirect: "error" }]);
+    // 받은 바이트가 그대로 Gemini 로 간다.
+    expect(String(mocks.fetch.mock.calls[1]![1].body)).toContain(`"data":"${Buffer.from(AUDIO).toString("base64")}"`);
+    expect(voice.replies()[0]!.embeds).toHaveLength(1);
+  });
+
+  it("gives up before reading a download that announces more than 10 MB", async () => {
+    let cancelled = false;
+    // 본문은 작다: 걸러 내는 것은 응답이 밝힌 길이뿐이다.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(AUDIO);
+        controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    mocks.fetch.mockImplementation(async () => new Response(body, { headers: { "content-length": String(10 * MB + 1) } }));
+    const { handleVoiceMessage } = await boot();
+    const voice = voiceMessage();
+    await voice.send(handleVoiceMessage);
+
+    expect(voice.replies().map((r) => r.content)).toEqual([TOO_LARGE]);
+    expect(cancelled).toBe(true);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1); // Gemini 는 부르지 않는다
+    expect(pending()).toEqual([]);
+  });
+
+  it("stops a download that keeps growing past 10 MB, whatever length it announced", async () => {
+    let sent = 0;
+    let cancelled = false;
+    // 4KB 라고 밝히고 1MB 씩 16번 보내는 응답.
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent === 16) return controller.close();
+        sent += 1;
+        controller.enqueue(new Uint8Array(MB));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    mocks.fetch.mockImplementation(async () => new Response(body, { headers: { "content-length": "4096" } }));
+    const { handleVoiceMessage } = await boot();
+    const voice = voiceMessage();
+    await voice.send(handleVoiceMessage);
+
+    expect(voice.replies().map((r) => r.content)).toEqual([TOO_LARGE]);
+    // 끝까지 받지 않고 한도를 넘은 데서 끊는다.
+    expect(cancelled).toBe(true);
+    expect(sent).toBeLessThan(16);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(pending()).toEqual([]);
+  });
+
+  it("accepts a download of exactly 10 MB", async () => {
+    mocks.fetch.mockImplementation(async (asked: string) =>
+      asked === AUDIO_URL ? new Response(new Uint8Array(10 * MB), { headers: { "content-length": String(10 * MB) } }) : gemini(ANSWER),
+    );
+    const { handleVoiceMessage } = await boot();
+    const voice = voiceMessage({ files: [ogg({ size: 10 * MB })] });
+    await voice.send(handleVoiceMessage);
+    expect(voice.replies()[0]!.embeds).toHaveLength(1);
+  });
+});
+
 describe("what is sent to Gemini", () => {
   it("posts the audio inline with the key in a header and asks for the capture as JSON", async () => {
     seedVault([
@@ -540,6 +633,24 @@ describe("pending captures", () => {
     expect(later.interaction.editReply).not.toHaveBeenCalled();
     expect(mocks.capture).toHaveBeenCalledTimes(1);
     expect(field(shown, "결과")).toBe("✅ 할 일을 프로젝트/lvti.md에 추가했습니다.");
+  });
+
+  it("drops null and malformed saved entries instead of failing on them", async () => {
+    const kept = { transcript: "가", kind: "task", project: null, text: "어제 남긴 멀쩡한 캡처", createdAt: Date.now() - 86_400_000 };
+    writeFileSync(
+      join(root, "voice-captures.json"),
+      JSON.stringify({ "8001": null, "8002": "garbage", "8003": { transcript: "만든 시각이 없는 항목" }, "8004": kept }),
+    );
+    const { handleButton, shown } = await proposed();
+
+    // 새 캡처는 저장되고, 멀쩡한 것은 남고, 깨진 것만 사라진다.
+    expect(pending()).toEqual(["8004", "9001"]);
+    expect(saved<Record<string, unknown>>("voice-captures.json")["8004"]).toEqual(kept);
+    expect(buttons(shown)).toHaveLength(3);
+    const { interaction, press } = click("voice:task:8001", shown);
+    await press(handleButton);
+    expect(interaction.reply).toHaveBeenCalledWith({ content: "이 음성 캡처는 만료됨 (7일) — 다시 말해 주세요", flags: EPHEMERAL });
+    expect(mocks.capture).not.toHaveBeenCalled();
   });
 
   it("forgets a capture after 7 days, and its buttons say it expired", async () => {

@@ -49,6 +49,8 @@ const MAX_BYTES = 10 * 1024 * 1024; // base64 로 실어도 Gemini 인라인 요
 const MAX_SECONDS = 5 * 60;
 const TIMEOUT_MS = 45_000; // 음성 내려받기와 Gemini 호출을 합친 시간
 const KEEP_MS = 7 * 86_400_000;
+// 첨부는 Discord 의 저장소에서만 내려받는다. 끝의 / 까지 견주어 비슷한 이름의 호스트를 받지 않는다.
+const AUDIO_ORIGINS = ["https://cdn.discordapp.com/", "https://media.discordapp.net/"];
 
 const RESPONSE_SCHEMA = {
   type: "OBJECT",
@@ -71,7 +73,8 @@ function update(change: (captures: Record<string, VoiceCapture>) => void): void 
   const captures = readJsonObject<VoiceCapture>(FILE);
   change(captures);
   const oldest = Date.now() - KEEP_MS;
-  writeJsonObject(FILE, Object.fromEntries(Object.entries(captures).filter(([, c]) => c.createdAt >= oldest)));
+  // 파일에 null 이나 깨진 항목이 섞여 있어도 멈추지 않고 그 항목만 함께 지운다.
+  writeJsonObject(FILE, Object.fromEntries(Object.entries(captures).filter(([, c]) => c?.createdAt >= oldest)));
 }
 
 /** 인박스 채널에 주인이 올린 음성 메시지나 오디오 첨부. 그 밖의 메시지는 null. */
@@ -176,6 +179,28 @@ async function transcribe(
   };
 }
 
+/**
+ * 첨부를 한도까지만 내려받는다. Discord 가 알려 준 크기를 믿지 않고, 응답이 밝힌 길이와 실제로 받은 바이트를 본다.
+ * 다른 주소로 넘기는 응답은 따라가지 않는다.
+ */
+async function download(url: string, signal: AbortSignal): Promise<Buffer> {
+  const res = await fetch(url, { signal, redirect: "error" });
+  const tooLarge = () => new Error(`음성 파일이 ${MAX_BYTES / 1024 / 1024}MB 를 넘음`);
+  if (!res.ok || Number(res.headers.get("content-length")) > MAX_BYTES) {
+    void res.body?.cancel().catch(() => {});
+    throw res.ok ? tooLarge() : new Error(`음성 내려받기 HTTP ${res.status}`);
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  // 한도를 넘는 순간 던진다. 반복을 벗어나면 남은 본문은 받지 않는다.
+  for await (const chunk of res.body ?? []) {
+    size += chunk.byteLength;
+    if (size > MAX_BYTES) throw tooLarge();
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 /** 실패 이유를 문장 속에 넣을 한 줄로. 스택은 싣지 않고 토큰 모양의 값은 가린다. */
 function reasonOf(err: unknown): string {
   const reason = !(err instanceof Error)
@@ -242,17 +267,19 @@ export async function handleVoiceMessage(message: Message): Promise<boolean> {
     await reply({ content: `🎙️ 음성이 한도를 넘었습니다 (${over}) — 5분·10MB 까지 받습니다. 나눠서 보내 주세요.` });
     return true;
   }
+  if (!AUDIO_ORIGINS.some((origin) => audio.url.startsWith(origin))) {
+    await reply({ content: "🎙️ 이 첨부는 읽을 수 없습니다 — Discord 에 올린 파일만 받습니다." });
+    return true;
+  }
 
   if ("sendTyping" in message.channel) void message.channel.sendTyping().catch(() => undefined);
   const choices = projectChoices();
   let proposal: Proposal;
   try {
     const signal = AbortSignal.timeout(TIMEOUT_MS);
-    const file = await fetch(audio.url, { signal });
-    if (!file.ok) throw new Error(`음성 내려받기 HTTP ${file.status}`);
     // 음성 메시지는 Ogg Opus 다. 종류에 붙은 매개변수(; codecs=…)는 떼고 보낸다.
     const mimeType = (audio.contentType ?? "audio/ogg").split(";")[0].trim();
-    proposal = await transcribe(Buffer.from(await file.arrayBuffer()), mimeType, choices, signal);
+    proposal = await transcribe(await download(audio.url, signal), mimeType, choices, signal);
   } catch (err) {
     console.warn("[voice] transcription failed:", reasonOf(err));
     captureException(err, { kind: "voice-capture" });
