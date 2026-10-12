@@ -8,6 +8,7 @@ import { startResourceMonitor } from "./monitor/resources.js";
 import { handleSlash } from "./handlers/slash.js";
 import { handleThreadMessage } from "./handlers/thread-message.js";
 import { handleNaturalMessage } from "./nl/router.js";
+import { handleVoiceMessage } from "./voice/index.js";
 import { handleButton } from "./handlers/button.js";
 import { handleModalSubmit } from "./handlers/modal.js";
 import { handleSelect } from "./handlers/select.js";
@@ -85,6 +86,14 @@ client.on(Events.MessageCreate, async (message) => {
   } catch (err) {
     console.error("[content] message intake failed");
     captureException(err, { kind: "content-message", channelId: message.channelId });
+    return;
+  }
+  // 인박스 채널의 음성 메시지: 받아써서 볼트 캡처를 제안한다. 그 밖의 메시지는 아래로 그대로 지나간다.
+  try {
+    if (await handleVoiceMessage(message)) return;
+  } catch (err) {
+    console.error("[voice] error:", err);
+    captureException(err, { kind: "voice-message", channelId: message.channelId });
     return;
   }
   // 전용 자연어 채널: 명령어 없이 그냥 말하면 의도 분류→라우팅.

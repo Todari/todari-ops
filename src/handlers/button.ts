@@ -14,6 +14,7 @@ import {
 import { buildCheckinModal, pickTomorrowFirstTask } from "../checkin/index.js";
 import { handleTidyButton } from "../task-loop/tidy.js";
 import { completeTodayPick } from "../task-loop/today.js";
+import { handleVoiceButton } from "../voice/index.js";
 import { fetchInboxChannel } from "../discord/alerts.js";
 import { dueCards, gradeCard } from "../jp/cards.js";
 import type { Grade } from "../jp/srs.js";
@@ -82,6 +83,11 @@ export async function handleButton(interaction: ButtonInteraction): Promise<void
 
   if (kind === "today" && action === "done") {
     await completeTodayPick(interaction);
+    return;
+  }
+
+  if (kind === "voice") {
+    await handleVoiceButton(interaction);
     return;
   }
 

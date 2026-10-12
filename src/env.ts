@@ -30,6 +30,10 @@ export const env = {
   INSTAGRAM_WEBHOOK_SECRET: process.env.INSTAGRAM_WEBHOOK_SECRET ?? "",
   INSTAGRAM_CHANNEL_ID: process.env.INSTAGRAM_CHANNEL_ID ?? "",
   INBOX_CHANNEL_ID: process.env.INBOX_CHANNEL_ID ?? "",
+  // 음성 캡처(docs/voice-capture.md). 키가 비면 인박스 채널의 음성 메시지에 "꺼져 있음"만 답한다.
+  GEMINI_API_KEY: (process.env.GEMINI_API_KEY ?? "").trim(),
+  // 빈 값이면 모델 없는 주소로 요청하게 되므로 기본값으로 떨어뜨린다.
+  VOICE_MODEL: process.env.VOICE_MODEL?.trim() || "gemini-3.8-flash",
   WEBHOOK_ENABLED: (process.env.WEBHOOK_ENABLED ?? "true").toLowerCase() === "true",
   UPTIME_ENABLED: (process.env.UPTIME_ENABLED ?? "true").toLowerCase() === "true",
   UPTIME_INTERVAL_MS: Number(process.env.UPTIME_INTERVAL_MS ?? 300_000),
