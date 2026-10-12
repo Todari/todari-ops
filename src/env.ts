@@ -44,7 +44,9 @@ export const env = {
   CHECKIN_TIME: process.env.CHECKIN_TIME ?? "21:30", // KST HH:MM, empty = disabled
   // 자동 데일리 기록(docs/daily-log.md). 이 시각에 "어제" 하루를 볼트 데일리 노트로 쓴다.
   DAILY_LOG_TIME: process.env.DAILY_LOG_TIME ?? "00:40", // KST HH:MM, empty = disabled
-  // 커밋을 모을 GitHub 소유자(쉼표 구분). 비면 카탈로그 레포의 소유자들.
+  // 커밋의 작성자로 볼 GitHub 로그인. 비면 GITHUB_TOKEN 의 주인(GET /user).
+  DAILY_LOG_AUTHOR: (process.env.DAILY_LOG_AUTHOR ?? "").trim(),
+  // 커밋 검색을 이 GitHub 소유자(쉼표 구분)의 레포로 더 좁힌다. 비면 좁히지 않는다.
   DAILY_LOG_OWNERS: (process.env.DAILY_LOG_OWNERS ?? "")
     .split(",")
     .map((s) => s.trim())

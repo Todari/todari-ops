@@ -109,18 +109,33 @@ export async function collectActivity(date: string): Promise<DayEvidence> {
   return { ...found, events, notes };
 }
 
+// GITHUB_TOKEN 주인의 로그인. 봇이 떠 있는 동안 바뀌지 않으므로 알아낸 뒤에는 다시 묻지 않는다.
+let tokenLogin: string | undefined;
+
+/** 커밋의 작성자로 볼 GitHub 로그인: DAILY_LOG_AUTHOR, 없으면 봇 토큰의 주인. 알아내지 못하면 undefined. */
+async function authorLogin(): Promise<string | undefined> {
+  if (env.DAILY_LOG_AUTHOR) return env.DAILY_LOG_AUTHOR;
+  // 실패한 조회는 담아 두지 않는다. 다음 수집 때 다시 묻는다.
+  tokenLogin ??= (await ghJson<{ login?: string }>("/user"))?.login || undefined;
+  return tokenLogin;
+}
+
 async function searchCommits(
   window: DayWindow,
 ): Promise<Pick<DayEvidence, "commits" | "commitsBeyondPage">> {
-  const owners =
-    env.DAILY_LOG_OWNERS.length > 0
-      ? env.DAILY_LOG_OWNERS
-      : [...new Set(projects.flatMap((p) => repoFullName(p)?.split("/")[0] ?? []))];
-  if (owners.length === 0) return { commits: [], commitsBeyondPage: 0 };
+  // 작성자로 찾는다. 소유자(user:)로 찾으면 조직 레포에 올라온 다른 사람·봇의 커밋까지 "한 일"로 적힌다.
+  const author = await authorLogin();
+  let owners = env.DAILY_LOG_OWNERS;
+  // 작성자를 알 수 없을 때만 예전처럼 카탈로그 레포 소유자들의 레포 전체를 본다.
+  if (!author && owners.length === 0) {
+    owners = [...new Set(projects.flatMap((p) => repoFullName(p)?.split("/")[0] ?? []))];
+  }
+  if (!author && owners.length === 0) return { commits: [], commitsBeyondPage: 0 };
   const vaultRepo = repoFullName(VAULT_PROJECT);
   const iso = (ms: number) => new Date(ms).toISOString().slice(0, 19) + "Z";
   // 볼트 자동 백업이 검색 한 쪽(100건)을 채우지 않게 질의에서부터 뺀다.
   const q = [
+    ...(author ? [`author:${author}`] : []),
     ...owners.map((owner) => `user:${owner}`),
     ...(vaultRepo ? [`-repo:${vaultRepo}`] : []),
     `committer-date:${iso(window.start)}..${iso(window.end)}`,

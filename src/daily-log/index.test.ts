@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const mocks = vi.hoisted(() => ({
   env: {
-    WORK_DIR: "", DAILY_LOG_TIME: "00:40", DAILY_LOG_OWNERS: [] as string[],
+    WORK_DIR: "", DAILY_LOG_TIME: "00:40", DAILY_LOG_AUTHOR: "", DAILY_LOG_OWNERS: [] as string[],
     VAULT_REPO_URL: "https://github.com/Todari/obsidian-vault.git",
   },
   ghJson: vi.fn(), added: vi.fn(), write: vi.fn(), brief: vi.fn(), card: vi.fn(), firstTask: vi.fn(),
@@ -30,6 +30,12 @@ const commit = (repo: string, message: string, at: string) => ({
 const evidence = (over: Partial<DayEvidence> = {}): DayEvidence => ({
   commits: [], commitsBeyondPage: 0, events: [], notes: [], ...over,
 });
+/** GitHub 의 답: 커밋 검색 결과와 토큰의 주인(GET /user, null 이면 알아내지 못한다). */
+function github(search: unknown = null, login: string | null = "octo-owner") {
+  mocks.ghJson.mockImplementation(async (path: string) => (path === "/user" ? login && { login } : search));
+}
+/** 봇이 GitHub 에 물은 것들, 순서대로. */
+const asked = () => mocks.ghJson.mock.calls.map(([path]) => decodeURIComponent(String(path)));
 
 describe("kstDayWindow", () => {
   it("is the KST calendar day, nine hours ahead of the UTC one", () => {
@@ -181,7 +187,7 @@ describe("nightly scheduler", () => {
   }
   /** 2026-10-11 하루에 근거가 있었다. */
   function aBusyDay() {
-    mocks.ghJson.mockResolvedValue({
+    github({
       total_count: 2,
       items: [commit("Todari/todari-ops", "fix: b", "11T21:00"), commit("Todari/todari-ops", "feat: a", "11T09:00")],
     });
@@ -198,8 +204,10 @@ describe("nightly scheduler", () => {
     vi.useFakeTimers();
     for (const method of ["log", "warn", "error"] as const) vi.spyOn(console, method).mockImplementation(() => {});
     root = mkdtempSync(join(tmpdir(), "daily-log-"));
-    Object.assign(mocks.env, { WORK_DIR: join(root, "work"), DAILY_LOG_TIME: "00:40", DAILY_LOG_OWNERS: [] });
-    mocks.ghJson.mockResolvedValue(null);
+    Object.assign(mocks.env, {
+      WORK_DIR: join(root, "work"), DAILY_LOG_TIME: "00:40", DAILY_LOG_AUTHOR: "", DAILY_LOG_OWNERS: [],
+    });
+    github();
     mocks.added.mockResolvedValue([]);
     mocks.write.mockResolvedValue({ changed: true, commit: "abc1234", summary: "" });
     mocks.brief.mockReturnValue(null);
@@ -235,12 +243,12 @@ describe("nightly scheduler", () => {
       "### 내일 첫 작업",
       "- todari-ops · 배포 확인",
     ].join("\n")]]);
-    // 근거는 모두 그 KST 하루로 묻는다. 커밋 검색은 카탈로그 레포의 소유자 전체를 한 번에.
-    expect(mocks.ghJson).toHaveBeenCalledTimes(1);
-    expect(decodeURIComponent(String(mocks.ghJson.mock.calls[0]?.[0]))).toBe(
-      "/search/commits?q=user:Todari user:yeouido-penthouse-cattower user:linkive -repo:Todari/obsidian-vault " +
+    // 근거는 모두 그 KST 하루로 묻는다. 커밋은 토큰의 주인이 쓴 것만, 소유자로 묶지 않고 한 번에 찾는다.
+    expect(asked()).toEqual([
+      "/user",
+      "/search/commits?q=author:octo-owner -repo:Todari/obsidian-vault " +
         "committer-date:2026-10-10T15:00:00Z..2026-10-11T15:00:00Z&sort=committer-date&order=desc&per_page=100",
-    );
+    ]);
     expect(mocks.added).toHaveBeenCalledWith(DAY.start, DAY.end);
     expect(mocks.card).toHaveBeenCalledWith(DAY.start, DAY.end);
     expect(mocks.firstTask).toHaveBeenCalledWith("2026-10-11");
@@ -301,12 +309,40 @@ describe("nightly scheduler", () => {
     expect(mocks.write.mock.calls).toEqual(used ? [["2026-10-11", "### 인스타 게시\n게시: 2/2건"]] : []);
   });
 
-  it("searches only the configured owners when DAILY_LOG_OWNERS is set", async () => {
+  it("asks who the token belongs to once per process, and narrows to DAILY_LOG_OWNERS when it is set", async () => {
+    const log = await boot(kst("09:00"));
+    await log.writeDailyLog("2026-10-11");
     mocks.env.DAILY_LOG_OWNERS = ["Todari", "my-org"];
+    await log.writeDailyLog("2026-10-11");
+    expect(asked()).toEqual([
+      "/user",
+      expect.stringContaining("q=author:octo-owner -repo:Todari/obsidian-vault committer-date:"),
+      expect.stringContaining("q=author:octo-owner user:Todari user:my-org -repo:Todari/obsidian-vault committer-date:"),
+    ]);
+  });
+
+  it("takes the author from DAILY_LOG_AUTHOR without asking GitHub", async () => {
+    mocks.env.DAILY_LOG_AUTHOR = "someone-else";
     await (await boot(kst("09:00"))).writeDailyLog("2026-10-11");
-    expect(decodeURIComponent(String(mocks.ghJson.mock.calls[0]?.[0]))).toContain(
-      "q=user:Todari user:my-org -repo:Todari/obsidian-vault committer-date:",
-    );
+    expect(asked()).toEqual([expect.stringContaining("q=author:someone-else -repo:Todari/obsidian-vault committer-date:")]);
+  });
+
+  it("falls back to the owners' repositories while the login is unknown, and asks again the next time", async () => {
+    github(null, null); // GET /user 가 실패한다
+    const log = await boot(kst("09:00"));
+    await log.writeDailyLog("2026-10-11");
+    mocks.env.DAILY_LOG_OWNERS = ["my-org"];
+    await log.writeDailyLog("2026-10-11");
+    github(); // GitHub 이 다시 답한다
+    await log.writeDailyLog("2026-10-11");
+    expect(asked()).toEqual([
+      "/user", // 카탈로그 레포의 소유자들
+      expect.stringContaining("q=user:Todari user:yeouido-penthouse-cattower user:linkive -repo:Todari/obsidian-vault committer-date:"),
+      "/user",
+      expect.stringContaining("q=user:my-org -repo:Todari/obsidian-vault committer-date:"),
+      "/user",
+      expect.stringContaining("q=author:octo-owner user:my-org -repo:Todari/obsidian-vault committer-date:"),
+    ]);
   });
 
   it("reports a failed vault write, records no summary and still arms the next night", async () => {
