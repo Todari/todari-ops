@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -172,7 +172,8 @@ describe("renderDailyLog", () => {
 
 describe("nightly scheduler", () => {
   let root: string;
-  const saved = (name: string) => JSON.parse(readFileSync(join(root, name), "utf8")) as Record<string, string>;
+  const saved = (name: string) => JSON.parse(readFileSync(join(root, name), "utf8")) as Record<string, unknown>;
+  const written = () => mocks.write.mock.calls.map(([date]) => date as string);
   const seed = (name: string, value: unknown) => writeFileSync(join(root, name), JSON.stringify(value));
 
   /** 봇 (재)시작: 메모리 상태와 걸려 있던 타이머를 버리고 bot.ts 처럼 예약을 건다. */
@@ -254,7 +255,9 @@ describe("nightly scheduler", () => {
     expect(mocks.firstTask).toHaveBeenCalledWith("2026-10-11");
 
     expect(saved("scheduled-posts.json")["daily-log"]).toBe("2026-10-12");
-    expect(saved("daily-log.json")).toEqual({ date: "2026-10-11", summary: "커밋 2 · 배포 1 · 새 노트 1" });
+    expect(saved("daily-log.json")).toEqual({
+      date: "2026-10-11", summary: "커밋 2 · 배포 1 · 새 노트 1", processed: "2026-10-11", pending: [],
+    });
     vi.setSystemTime(kst("08:30"));
     expect(log.yesterdayLogSummary()).toBe("커밋 2 · 배포 1 · 새 노트 1 → 볼트 데일리/2026-10-11.md");
     vi.setSystemTime(kst("08:30", "2026-10-13")); // 다음 날 기록이 없으면 지난 요약을 다시 보여주지 않는다
@@ -266,12 +269,54 @@ describe("nightly scheduler", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(mocks.added).toHaveBeenCalledWith(DAY.start, DAY.end); // 찾아봤지만 없었다
     expect(mocks.write).not.toHaveBeenCalled();
-    expect(existsSync(join(root, "daily-log.json"))).toBe(false);
+    expect(saved("daily-log.json")).toEqual({ processed: "2026-10-11", pending: [] }); // 근거가 없던 날도 살펴본 날이다
     expect(saved("scheduled-posts.json")["daily-log"]).toBe("2026-10-12");
 
     mocks.firstTask.mockReturnValue("이정표 · 사업계획서 제출");
     await vi.advanceTimersByTimeAsync(86_400_000);
-    expect(mocks.write.mock.calls).toEqual([["2026-10-12", "### 내일 첫 작업\n- 이정표 · 사업계획서 제출"]]);
+    expect(mocks.write.mock.calls).toEqual([["2026-10-12", "### 내일 첫 작업\n- 이정표 · 사업계획서 제출"]]); // 10-11 은 다시 보지 않는다
+  });
+
+  it("fills in the days it missed, oldest first and seven at most", async () => {
+    // 날마다 근거가 하나씩 있었다. 2026-10-10 만 빈 날이다.
+    mocks.firstTask.mockImplementation((date: string) => (date === "2026-10-10" ? null : `${date} 에 정한 일`));
+    seed("daily-log.json", { date: "2026-10-08", summary: "커밋 1" }); // processed 가 생기기 전의 파일: 마지막으로 쓴 날만 있다
+    seed("scheduled-posts.json", { "daily-log": "2026-10-09" }); // 그 뒤로 봇이 사흘 내려가 있었다
+    const log = await boot(kst("10:00"));
+    expect(written()).toEqual(["2026-10-09", "2026-10-11"]);
+    expect(saved("daily-log.json")).toEqual({ date: "2026-10-11", summary: "기록됨", processed: "2026-10-11", pending: [] });
+    expect(log.yesterdayLogSummary()).toBe("기록됨 → 볼트 데일리/2026-10-11.md");
+
+    // 더 오래 내려가 있었으면 최근 7일만 채우고, 그보다 오래된 날은 못 쓴 날이어도 포기한다.
+    seed("daily-log.json", { processed: "2026-10-11", pending: ["2026-10-10", "2026-10-25"] });
+    mocks.write.mockClear();
+    await boot(kst("10:00", "2026-10-30"));
+    expect(written()).toEqual([
+      "2026-10-23", "2026-10-24", "2026-10-25", "2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29",
+    ]);
+    expect(saved("daily-log.json")).toMatchObject({ date: "2026-10-29", processed: "2026-10-29", pending: [] });
+  });
+
+  it("keeps going past a day that fails and writes only that day again on the next run", async () => {
+    mocks.firstTask.mockImplementation((date: string) => `${date} 에 정한 일`);
+    const failure = new Error("vault push conflict");
+    mocks.write.mockImplementation(async (date: string) => {
+      if (date === "2026-10-10") throw failure;
+      return { changed: true, commit: "abc1234", summary: "" };
+    });
+    seed("daily-log.json", { processed: "2026-10-08" });
+    seed("scheduled-posts.json", { "daily-log": "2026-10-09" });
+    const log = await boot(kst("10:00"));
+    expect(written()).toEqual(["2026-10-09", "2026-10-10", "2026-10-11"]);
+    expect(mocks.captureException.mock.calls).toEqual([[failure, { kind: "daily-log", date: "2026-10-10" }]]);
+    expect(saved("daily-log.json")).toMatchObject({ date: "2026-10-11", processed: "2026-10-11", pending: ["2026-10-10"] });
+    expect(log.yesterdayLogSummary()).toBe("기록됨 → 볼트 데일리/2026-10-11.md"); // 다이제스트는 어제 것을 그대로 싣는다
+
+    mocks.write.mockReset();
+    mocks.write.mockResolvedValue({ changed: true, commit: "def5678", summary: "" });
+    await vi.advanceTimersByTimeAsync(kst("00:40", "2026-10-13") - kst("10:00"));
+    expect(written()).toEqual(["2026-10-10", "2026-10-12"]); // 이미 쓴 09·11 은 다시 쓰지 않는다
+    expect(saved("daily-log.json")).toMatchObject({ date: "2026-10-12", processed: "2026-10-12", pending: [] });
   });
 
   it("catches up once after a restart past the scheduled time", async () => {
@@ -351,8 +396,9 @@ describe("nightly scheduler", () => {
     mocks.write.mockRejectedValue(failure);
     const log = await boot(kst("00:39"));
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(mocks.captureException).toHaveBeenCalledWith(failure, { kind: "daily-log" });
+    expect(mocks.captureException).toHaveBeenCalledWith(failure, { kind: "daily-log", date: "2026-10-11" });
     expect(log.yesterdayLogSummary()).toBeNull();
+    expect(saved("daily-log.json")).toEqual({ processed: "2026-10-11", pending: ["2026-10-11"] });
     expect(vi.getTimerCount()).toBe(1);
   });
 

@@ -156,6 +156,11 @@ export function todayKst(): string {
   return new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
 }
 
+/** date(YYYY-MM-DD)에서 days 일 뒤의 날짜. 음수면 그만큼 앞의 날짜. */
+export function addDays(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
 /** Days from today (KST) to date: negative = past, 0 = today. */
 export function daysUntil(date: string): number {
   const a = Date.parse(todayKst() + "T00:00:00Z");

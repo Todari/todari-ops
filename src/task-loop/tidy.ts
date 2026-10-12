@@ -24,6 +24,7 @@ import {
   type VaultTaskRef,
 } from "../vault/mutations.js";
 import {
+  addDays,
   completeCapturedVaultTask,
   getVaultState,
   setCapturedVaultTaskDue,
@@ -73,10 +74,6 @@ function update(change: (state: TidyState) => void): TidyState {
   change(state);
   writeJsonObject(FILE, state);
   return state;
-}
-
-function addDays(date: string, days: number): string {
-  return new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
 }
 
 /** date 뒤에 처음 오는 금요일. 금요일에 누르면 7일 뒤다. */
