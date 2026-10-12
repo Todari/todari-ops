@@ -90,12 +90,33 @@ export async function completeCapturedVaultTask(
   slug: string,
   rawText: string,
 ): Promise<void> {
+  const text = normalizeTaskText(rawText);
+  await rewriteCapturedTasks(note, slug, (tasks) => tasks.filter((task) => task.text !== text));
+}
+
+/** 봇이 볼트의 할 일 줄에 적은 마감일을 다음 snapshot 전까지 반영한다. */
+export async function setCapturedVaultTaskDue(
+  note: string,
+  slug: string,
+  rawText: string,
+  due: string,
+): Promise<void> {
+  const text = normalizeTaskText(rawText);
+  await rewriteCapturedTasks(note, slug, (tasks) =>
+    tasks.map((task) => (task.text === text ? { ...task, due } : task)),
+  );
+}
+
+async function rewriteCapturedTasks(
+  note: string,
+  slug: string,
+  rewrite: (tasks: VaultTask[]) => VaultTask[],
+): Promise<void> {
   const state = getVaultState();
   if (!state) return;
-  const text = normalizeTaskText(rawText);
   const notes = state.notes.map((entry) => {
     if (entry.slug !== slug && entry.note !== note) return entry;
-    return { ...entry, tasks: entry.tasks.filter((task) => task.text !== text) };
+    return { ...entry, tasks: rewrite(entry.tasks) };
   });
   await saveVaultState({ generatedAt: new Date().toISOString(), notes });
 }

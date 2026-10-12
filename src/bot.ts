@@ -10,6 +10,7 @@ import { handleThreadMessage } from "./handlers/thread-message.js";
 import { handleNaturalMessage } from "./nl/router.js";
 import { handleButton } from "./handlers/button.js";
 import { handleModalSubmit } from "./handlers/modal.js";
+import { handleSelect } from "./handlers/select.js";
 import { startWebhookServer } from "./webhook/server.js";
 import { startUptimeMonitor } from "./monitor/uptime.js";
 import { startExpiryMonitor } from "./monitor/expiry.js";
@@ -61,6 +62,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await handleButton(interaction);
     } else if (interaction.isModalSubmit()) {
       await handleModalSubmit(interaction);
+    } else if (interaction.isStringSelectMenu()) {
+      await handleSelect(interaction);
     }
   } catch (err) {
     console.error("[interaction] error:", err);

@@ -19,6 +19,8 @@ import { findProjectByRepoFullName } from "../projects.js";
 import { getVaultState, todayKst, type VaultState } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
+import { withoutSnoozed } from "../task-loop/tidy.js";
+import { todayDoneRows, todayPicksField } from "../task-loop/today.js";
 import { getPendingAction, putPendingAction } from "../webhook/pending.js";
 
 // 저녁 체크인: 21:30(KST) #daily 에 [회고 쓰기] 버튼 → 모달(오늘/막힘/내일)
@@ -26,6 +28,7 @@ import { getPendingAction, putPendingAction } from "../webhook/pending.js";
 // "내일 첫 작업"은 봇이 직접 저장해 다음날 아침 다이제스트 최상단에 띄운다.
 // 글을 쓰지 않아도 닫을 수 있게 같은 메시지에 오늘 한 일(봇이 모은 근거)과
 // "내일 첫 작업" 후보 버튼을 붙인다. 후보를 한 번 누르면 모달 없이 저장된다.
+// 아침에 "오늘의 3개"를 골랐으면 그것과 완료 버튼(✅ 1~3) 한 줄도 붙는다(docs/task-loop.md).
 
 interface CheckinState {
   date: string; // 체크인한 저녁의 KST 날짜
@@ -88,7 +91,7 @@ function openRow(date: string): ActionRowBuilder<ButtonBuilder> {
   );
 }
 
-/** 오늘 한 일 요약과 "내일 첫 작업" 후보 버튼. 못 만들어도 프롬프트는 그대로 나간다. */
+/** 오늘 한 일 요약·오늘의 3개와 "내일 첫 작업" 후보 버튼. 못 만들어도 프롬프트는 그대로 나간다. */
 async function oneTapExtras(
   date: string,
 ): Promise<{ embeds: EmbedBuilder[]; rows: Array<ActionRowBuilder<ButtonBuilder>> }> {
@@ -99,6 +102,8 @@ async function oneTapExtras(
       // 임베드에서는 위키링크가 걸리지 않는다. 노트 이름만 남긴다.
       value: clip(section.lines.join("\n").replace(/\[\[(.+?)\]\]/g, "$1"), 1000),
     }));
+    const picked = todayPicksField(date);
+    if (picked) fields.push(picked);
     const embeds =
       fields.length > 0
         ? [new EmbedBuilder().setColor(0x6366f1).setTitle("오늘 한 일 (지금까지)").addFields(fields)]
@@ -111,7 +116,8 @@ async function oneTapExtras(
     // 긴 한글 문장이 잘리지 않게 후보마다 한 줄을 쓴다.
     // ponytail: 후보 원문은 메모리(putPendingAction)에 둔다 — 봇이 재시작하면 버튼이 만료된다.
     // 배포가 저녁과 자주 겹치면 /data 에 보관하도록 바꾼다.
-    const rows = (vault ? firstTaskCandidates(vault, active) : []).map((task) => {
+    // 보류(4주)한 할 일은 후보로 권하지 않는다.
+    const rows = (vault ? firstTaskCandidates(withoutSnoozed(vault), active) : []).map((task) => {
       const id = putPendingAction(
         { projectSlug: "vault", threadName: "checkin-pick", prompt: task },
         PICK_TTL_MS,
@@ -123,7 +129,8 @@ async function oneTapExtras(
           .setStyle(ButtonStyle.Secondary),
       );
     });
-    return { embeds, rows };
+    // 모달 버튼 1줄 + 후보 최대 3줄 + 완료 버튼 1줄 = Discord 한도인 5줄.
+    return { embeds, rows: [...rows, ...todayDoneRows(date)] };
   } catch (err) {
     console.warn("[checkin] one-tap extras failed:", err);
     return { embeds: [], rows: [] };
@@ -160,7 +167,7 @@ export function firstTaskCandidates(vault: VaultState, activeSlugs: string[], li
   return [...new Set(texts)].slice(0, limit);
 }
 
-/** 후보 버튼 한 번으로 "내일 첫 작업"을 정한다. 후보 버튼은 고른 내용 한 줄로 바뀌고 회고 버튼은 남는다. */
+/** 후보 버튼 한 번으로 "내일 첫 작업"을 정한다. 후보 버튼은 고른 내용 한 줄로 바뀌고 회고·완료 버튼은 남는다. */
 export async function pickTomorrowFirstTask(interaction: ButtonInteraction): Promise<void> {
   // customId: checkin:pick:<체크인 날짜>:<후보 id> — 자정 넘어 눌러도 그 저녁의 체크인으로 남는다.
   const [, , date, id] = interaction.customId.split(":");
@@ -175,7 +182,7 @@ export async function pickTomorrowFirstTask(interaction: ButtonInteraction): Pro
   await saveTomorrowFirstTask(date, task);
   await interaction.update({
     content: `${interaction.message.content}\n🎯 내일 첫 작업: ${task}`,
-    components: [openRow(date)],
+    components: [openRow(date), ...todayDoneRows(date)],
   });
 }
 

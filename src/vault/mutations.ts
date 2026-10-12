@@ -14,7 +14,14 @@ import path from "node:path";
 import { env } from "../env.js";
 import { captureException } from "../observability/sentry.js";
 import { githubAuthEnv } from "../workspaces/checkout.js";
-import { appendIdea, completeTask, insertTask, upsertAutoLog } from "./editor.js";
+import {
+  appendIdea,
+  completeTask,
+  dropTask,
+  insertTask,
+  setTaskDue,
+  upsertAutoLog,
+} from "./editor.js";
 import { ensureVaultCheckout } from "./repo.js";
 import { todayKst } from "./state.js";
 
@@ -33,11 +40,22 @@ export interface VaultMutationResult {
   commit?: string;
 }
 
+export interface BlameLine {
+  /** 그 줄을 마지막으로 바꾼 커밋의 시각(ms). */
+  time: number;
+  text: string;
+}
+
 const BOT_NAME = "todari-ops[bot]";
 const BOT_EMAIL = "todari-ops@users.noreply.github.com";
 const NOTE_TIMEOUT_MS = 4 * 60_000;
 const MAX_CHANGED_FILES = 3;
 const MAX_CHANGED_LINES = 200;
+const TASK_COMMITS = {
+  complete: "vault: complete task via todari-ops",
+  next: "vault: tidy task (next week) via todari-ops",
+  drop: "vault: tidy task (dropped) via todari-ops",
+};
 const ALLOWED_ROOTS = new Set([
   "프로젝트",
   "이정표",
@@ -59,7 +77,19 @@ export function applyVaultCapture(
 }
 
 export function completeVaultTask(ref: VaultTaskRef): Promise<VaultMutationResult> {
-  return serialize(() => completeVaultTaskNow(ref));
+  return serialize(() => editVaultTaskNow(ref, "complete"));
+}
+
+/** 금요일 할 일 정리: 그 줄에 마감일 date 를 적거나(next), date 에 버렸다고 표시한다(drop). */
+export function tidyVaultTask(
+  ref: VaultTaskRef,
+  action: "next" | "drop",
+  date: string,
+): Promise<VaultMutationResult> {
+  return serialize(async () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`invalid tidy date: ${date}`);
+    return editVaultTaskNow(ref, action, date);
+  });
 }
 
 /** 그날의 자동 기록을 `데일리/YYYY-MM-DD.md`에 쓴다. 다른 볼트 쓰기와 같은 큐·검증·push 를 탄다. */
@@ -88,6 +118,36 @@ export function listVaultNotesAdded(since: number, until: number): Promise<strin
       "*.md",
     ]);
     return [...new Set(out.split("\n").filter(Boolean))];
+  });
+}
+
+/**
+ * 노트마다 `git blame` 한 번으로 각 줄이 마지막으로 바뀐 시각을 읽는다(노트 이름 → 줄들).
+ * 파일을 찾지 못한 노트는 결과에서 빠진다. pull 이 checkout 을 움직이므로 쓰기와 같은 큐에서 읽는다.
+ */
+export function blameVaultNotes(
+  refs: Array<Pick<VaultTaskRef, "projectSlug" | "note">>,
+): Promise<Map<string, BlameLine[]>> {
+  return serialize(async () => {
+    const dir = await ensureVaultCheckout();
+    const notes = new Map<string, BlameLine[]>();
+    for (const ref of refs) {
+      try {
+        const file = await resolveExistingPath(dir, taskNotePath(ref.projectSlug, ref.note));
+        const out = await git(dir, ["blame", "--line-porcelain", "--", path.relative(dir, file)]);
+        const lines: BlameLine[] = [];
+        let time = 0;
+        // 줄마다 머리말(committer-time 포함)이 먼저 오고, 탭으로 시작하는 줄이 그 줄의 내용이다.
+        for (const line of out.split("\n")) {
+          if (line.startsWith("committer-time ")) time = Number(line.slice(15)) * 1000;
+          else if (line.startsWith("\t")) lines.push({ time, text: line.slice(1).replace(/\r$/, "") });
+        }
+        notes.set(ref.note, lines);
+      } catch (err) {
+        console.warn(`[vault] blame skipped for ${ref.note}:`, errorMessage(err));
+      }
+    }
+    return notes;
   });
 }
 
@@ -176,32 +236,42 @@ async function applyVaultCaptureNow(
   }
 }
 
-async function completeVaultTaskNow(ref: VaultTaskRef): Promise<VaultMutationResult> {
+/** 열린 할 일 한 줄을 고친다: 완료(complete), 마감일 적기(next), 버림 표시(drop). */
+async function editVaultTaskNow(
+  ref: VaultTaskRef,
+  action: keyof typeof TASK_COMMITS,
+  date = "",
+): Promise<VaultMutationResult> {
   const dir = await prepareVault();
   try {
     const relative = taskNotePath(ref.projectSlug, ref.note);
     const file = await resolveExistingPath(dir, relative);
     const previous = await readFile(file, "utf8");
-    const edit = completeTask(previous, ref.text);
+    const edit =
+      action === "complete"
+        ? completeTask(previous, ref.text)
+        : action === "next"
+          ? setTaskDue(previous, ref.text, date)
+          : dropTask(previous, ref.text, date);
     if (!edit.changed) {
       return {
         changed: false,
         path: relative,
-        summary: "완료할 체크박스를 찾지 못했습니다.",
+        summary: "열린 체크박스를 찾지 못했습니다.",
       };
     }
     await writeFile(file, edit.content);
     const files = await validateChanges(dir);
-    const commit = await commitAndPush(dir, files, "vault: complete task via todari-ops");
+    const commit = await commitAndPush(dir, files, TASK_COMMITS[action]);
     return {
       changed: true,
       path: relative,
-      summary: `${relative}의 할 일을 완료 처리했습니다.`,
+      summary: `${relative}의 할 일을 고쳤습니다.`,
       commit,
     };
   } catch (err) {
     await discardVaultCheckout(dir).catch(() => undefined);
-    captureException(err, { kind: "vault-task-complete", projectSlug: ref.projectSlug });
+    captureException(err, { kind: `vault-task-${action}`, projectSlug: ref.projectSlug });
     throw err;
   }
 }

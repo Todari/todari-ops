@@ -31,6 +31,8 @@ export interface DayEvidence {
   notes: string[];
   instagram?: string;
   jp?: string;
+  /** 그날 아침에 고른 "오늘의 3개"와 완료 여부. */
+  picks?: Array<{ note: string; text: string; done?: boolean }>;
   firstTask?: string;
 }
 
@@ -187,6 +189,11 @@ export function renderSections(e: DayEvidence): Section[] {
     { title: "인스타 게시", lines: instagramLines(e.instagram ?? "") },
     { title: "볼트", lines: groupNotes(e.notes).map(noteLine) },
     { title: "일본어", lines: e.jp ? [`- ${oneLine(e.jp)}`] : [] },
+    // 체크박스(`- [ ]`)가 아닌 보통 글머리로 쓴다. 체크박스는 볼트에서 새 열린 할 일이 된다.
+    {
+      title: "오늘의 3개",
+      lines: (e.picks ?? []).map((p) => `- ${p.done ? "✅" : "⬜"} ${oneLine(`${p.note} · ${p.text}`)}`),
+    },
     { title: "내일 첫 작업", lines: e.firstTask ? [`- ${oneLine(e.firstTask)}`] : [] },
   ];
   return sections.filter((section) => section.lines.length > 0);

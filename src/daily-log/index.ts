@@ -11,6 +11,7 @@ import { readInstagramBrief } from "../monitor/status-board.js";
 import { captureException } from "../observability/sentry.js";
 import { readJsonObject, writeJsonObject } from "../storage/json-file.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
+import { getTodayPicks } from "../task-loop/today.js";
 import { writeVaultDailyLog } from "../vault/mutations.js";
 import {
   collectActivity,
@@ -58,6 +59,7 @@ export async function writeDailyLog(date: string): Promise<boolean> {
     ...(await collectActivity(date)),
     instagram: await optional("instagram brief", undefined, () => instagramBriefFor(window)),
     jp: await optional("jp", undefined, () => jpLine(window)),
+    picks: await optional("today picks", undefined, () => getTodayPicks(date)),
     firstTask: await optional("first task", undefined, () => getFirstTaskChosenOn(date) ?? undefined),
   };
   const body = renderDailyLog(evidence);

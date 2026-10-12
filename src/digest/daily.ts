@@ -10,10 +10,12 @@ import { ghJson } from "../github/api.js";
 import { getTodayFirstTask } from "../checkin/index.js";
 import { yesterdayLogSummary } from "../daily-log/index.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
+import { todayPickMenu, todayPicksField } from "../task-loop/today.js";
 import {
   collectDeadlines,
   ddayLabel,
   getVaultState,
+  todayKst,
   vaultAgeHours,
   type VaultState,
 } from "../vault/state.js";
@@ -115,15 +117,6 @@ export async function postDigest(): Promise<boolean> {
         ),
       });
     }
-    const taskLines: string[] = [];
-    for (const n of vault.notes) {
-      for (const t of n.tasks.slice(0, 2)) {
-        taskLines.push(`**${n.note}** · ${t.text}${t.due ? ` (📅 ${t.due.slice(5)})` : ""}`);
-      }
-    }
-    if (taskLines.length > 0) {
-      embed.addFields({ name: "📋 다음 할 일 (노트당 top 2)", value: truncate(taskLines.join("\n"), 1000) });
-    }
     const age = vaultAgeHours(vault);
     if (age > 36) {
       embed.setFooter({ text: `⚠️ 볼트 데이터 ${Math.round(age)}시간 전 기준 — Mac 동기화 확인 필요` });
@@ -171,7 +164,13 @@ export async function postDigest(): Promise<boolean> {
   const instagram = getInstagramBrief();
   if (instagram) embed.addFields({ name: "📸 인스타 게시", value: instagram });
 
-  const components = vault ? buildTaskButtons(vault) : [];
+  // 할 일을 나열하는 대신 오늘 할 3개를 고르게 한다. 수동 /digest 는 후보만 새로 뽑고 고른 것은 그대로 보여준다.
+  const today = todayKst();
+  const pickMenu = vault ? todayPickMenu(vault, today) : null;
+  const picked = todayPicksField(today);
+  if (picked) embed.addFields(picked);
+
+  const components = [...(pickMenu ? [pickMenu] : []), ...(vault ? buildTaskButtons(vault) : [])];
   // 아침 브리프는 하루 한 번 푸시로 도착을 알린다(서버 알림 기본값이 "@멘션만").
   await channel.send({ ...ownerMention(), embeds: [embed], components });
   void updateDailyTopic();

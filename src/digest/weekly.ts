@@ -6,9 +6,11 @@ import { eventsSince, type EventKind } from "../stats/events.js";
 import { collectDeadlines, ddayLabel, getVaultState } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
+import { lastOpenTaskCount, postTidy, recordOpenTaskCount } from "../task-loop/tidy.js";
 
 // 금요일 18:00 KST 주간 요약: 레포별 7일 커밋·머지 PR(GitHub API) +
 // 봇이 관측한 운영 이벤트(장애·CI 실패·배포) + 다음 주 마감. /week 로 수동 게시.
+// 요약 바로 뒤에 "할 일 정리"(오래 손대지 않은 할 일 5개)가 같은 채널로 따라 나간다.
 
 const WEEK_MS = 7 * 86_400_000;
 
@@ -24,7 +26,7 @@ function scheduleNext(): void {
   setTimeout(async () => {
     try {
       // 예약 게시는 KST 하루 한 번. 수동 /week 는 세지 않는다.
-      if (claimTodayKst("weekly")) await postWeekly();
+      if (claimTodayKst("weekly")) await postWeekly(true);
     } catch (err) {
       console.error("[weekly] failed:", err);
       captureException(err, { kind: "weekly" });
@@ -33,7 +35,8 @@ function scheduleNext(): void {
   }, delay);
 }
 
-export async function postWeekly(): Promise<boolean> {
+/** scheduled: 금요일 예약 게시. 그때만 열린 할 일 수를 남겨 다음 주 요약의 "지난주"가 된다. */
+export async function postWeekly(scheduled = false): Promise<boolean> {
   const channel = await fetchDigestChannel();
   if (!channel) return false;
 
@@ -92,7 +95,13 @@ export async function postWeekly(): Promise<boolean> {
   embed.addFields({ name: "운영 이벤트 (봇 관측)", value: opsLine.slice(0, 1000) });
 
   const vault = getVaultState();
+  const open = vault?.notes.reduce((sum, n) => sum + n.tasks.length, 0);
   if (vault) {
+    const last = lastOpenTaskCount();
+    embed.addFields({
+      name: "📋 열린 할 일",
+      value: `${open}개${last === undefined ? "" : ` (지난주 ${last}개)`}`,
+    });
     const next = collectDeadlines(vault, 0, 7);
     if (next.length > 0) {
       embed.addFields({
@@ -107,6 +116,14 @@ export async function postWeekly(): Promise<boolean> {
   }
 
   await channel.send({ embeds: [embed] });
+  if (scheduled && open !== undefined) recordOpenTaskCount(open);
+  try {
+    await postTidy(channel);
+  } catch (err) {
+    // 정리 목록을 만들지 못해도(볼트 pull·blame 실패) 주간 요약은 이미 나갔다.
+    console.warn("[weekly] task tidy failed:", err);
+    captureException(err, { kind: "task-tidy" });
+  }
   return true;
 }
 

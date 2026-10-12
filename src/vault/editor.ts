@@ -1,5 +1,11 @@
 const TASK_HEADING = "## 다음 할 일";
 const DATE_MARKER_RE = /📅\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2})/g;
+const OPEN_TASK_RE = /^(\s*[-*]\s+)\[ \](\s+)(.+)$/;
+// 볼트 스냅샷(vault/state.ts)은 할 일 문장을 이 길이에서 자른다.
+const SNAPSHOT_TEXT_MAX = 300;
+/** 스냅샷이 아는 모양의 할 일 문장. 줄과 기대값을 같은 모양으로 만들어 견준다. */
+const snapshotText = (value: string) =>
+  normalizeTaskText(normalizeTaskText(value).slice(0, SNAPSHOT_TEXT_MAX));
 
 export interface EditResult {
   content: string;
@@ -67,10 +73,35 @@ export function appendIdea(
 }
 
 export function completeTask(content: string, expectedText: string): EditResult {
-  const expected = normalizeTaskText(expectedText);
-  if (!expected) return { content, changed: false };
+  return editOpenTask(content, expectedText, (prefix, gap, text) => `${prefix}[x]${gap}${text}`);
+}
 
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
+/** 할 일 줄에 마감일(` 📅 YYYY-MM-DD`)을 적는다. 이미 📅 날짜가 있으면 그 날짜를 바꾼다. */
+export function setTaskDue(content: string, expectedText: string, due: string): EditResult {
+  return editOpenTask(content, expectedText, (prefix, gap, text) => {
+    const dated = text.match(DATE_MARKER_RE)
+      ? text.replace(DATE_MARKER_RE, `📅 ${due}`)
+      : `${text.trimEnd()} 📅 ${due}`;
+    return `${prefix}[ ]${gap}${dated}`;
+  });
+}
+
+/** 버린 할 일: `- [ ]`를 `- [-]`로 바꾸고 ` ❌ YYYY-MM-DD`를 붙인다. 줄은 남아서 무엇을 언제 버렸는지 보인다. */
+export function dropTask(content: string, expectedText: string, date: string): EditResult {
+  return editOpenTask(
+    content,
+    expectedText,
+    (prefix, gap, text) => `${prefix}[-]${gap}${text.trimEnd()} ❌ ${date}`,
+  );
+}
+
+/**
+ * `## 다음 할 일` 구획에서 그 할 일의 열린 체크박스가 있는 줄 번호(없으면 -1).
+ * 완료·정리·"오래 손대지 않은 할 일" 계산이 모두 같은 줄을 가리키게 한 곳에서 찾는다.
+ */
+export function findOpenTask(lines: string[], expectedText: string): number {
+  const expected = snapshotText(expectedText);
+  if (!expected) return -1;
   let inside = false;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
@@ -79,12 +110,28 @@ export function completeTask(content: string, expectedText: string): EditResult 
       continue;
     }
     if (!inside) continue;
-    const match = line.match(/^(\s*[-*]\s+)\[ \](\s+)(.+)$/);
-    if (!match || normalizeTaskText(match[3] ?? "") !== expected) continue;
-    lines[i] = `${match[1]}[x]${match[2]}${match[3]}`;
-    return { content: lines.join("\n"), changed: true };
+    const match = line.match(OPEN_TASK_RE);
+    // 긴 줄은 스냅샷이 아는 만큼(잘린 문장)으로 맞춘다. 그러지 않으면 300자를 넘는 할 일은 영영 찾지 못한다.
+    if (match && snapshotText(match[3] ?? "") === expected) return i;
   }
-  return { content, changed: false };
+  return -1;
+}
+
+function editOpenTask(
+  content: string,
+  expectedText: string,
+  rewrite: (prefix: string, gap: string, text: string) => string,
+): EditResult {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const index = findOpenTask(lines, expectedText);
+  const match = lines[index]?.match(OPEN_TASK_RE);
+  if (!match) return { content, changed: false };
+  // 줄 끝 공백은 mutation 검증(git diff --check)에 걸려 고친 것이 통째로 버려진다.
+  const rewritten = rewrite(match[1] ?? "", match[2] ?? "", match[3] ?? "").trimEnd();
+  // 이미 같은 날짜가 적힌 줄처럼 달라질 것이 없으면 쓰지 않는다(빈 커밋은 실패한다).
+  if (rewritten === lines[index]) return { content, changed: false };
+  lines[index] = rewritten;
+  return { content: lines.join("\n"), changed: true };
 }
 
 export function normalizeTaskText(value: string): string {

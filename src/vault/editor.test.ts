@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   appendIdea,
   completeTask,
+  dropTask,
+  findOpenTask,
   insertTask,
   normalizeTaskText,
+  setTaskDue,
   upsertAutoLog,
 } from "./editor.js";
 
@@ -50,6 +53,79 @@ describe("completeTask", () => {
   it("does not modify tasks outside the target section", () => {
     const result = completeTask("## 보류\n\n- [ ] 배포 확인\n", "배포 확인");
     expect(result.changed).toBe(false);
+  });
+});
+
+describe("tidying a task line", () => {
+  const NOTE = [
+    "# todari-ops",
+    "",
+    "## 다음 할 일",
+    "",
+    "- [ ] **배포 확인**",
+    "- [ ] 결제 오류 📅 8/12 재현하기",
+    "* [ ] [[가격 정책]] 정리 📅 2026-09-01  ", // 줄 끝 공백 두 칸
+    "- [x] 끝낸 일",
+    "",
+    "## 보류",
+    "- [ ] 구획 밖의 일",
+    "",
+  ].join("\n");
+  const line = (content: string, n: number) => content.split("\n")[n];
+
+  it("finds the open checkbox by the text the vault snapshot carries, inside 다음 할 일 only", () => {
+    const lines = NOTE.split("\n");
+    expect(findOpenTask(lines, "배포 확인")).toBe(4);
+    expect(findOpenTask(lines, "결제 오류 재현하기")).toBe(5);
+    expect(findOpenTask(lines, "가격 정책 정리")).toBe(6);
+    for (const missing of ["끝낸 일", "구획 밖의 일", "없는 일", ""]) expect(findOpenTask(lines, missing)).toBe(-1);
+  });
+
+  it("matches a line longer than the snapshot's 300 characters by its cut text", () => {
+    const long = `긴 할 일 ${"가나다라마바사 ".repeat(50)}끝`;
+    const note = `## 다음 할 일\n- [ ] 짧은 일\n- [ ] **${long}** 📅 2026-10-01\n`;
+    const snapshot = normalizeTaskText(long).slice(0, 300).trim(); // 스냅샷은 여기까지만 안다
+    expect(long.length).toBeGreaterThan(300);
+    expect(findOpenTask(note.split("\n"), snapshot)).toBe(2);
+    expect(findOpenTask(note.split("\n"), long)).toBe(2);
+    expect(completeTask(note, snapshot).content).toContain(`- [x] **${long}** 📅 2026-10-01`);
+    expect(findOpenTask(note.split("\n"), snapshot.slice(0, 250))).toBe(-1); // 앞부분이 같다고 같은 할 일은 아니다
+  });
+
+  it("setTaskDue appends the date to a plain line and leaves every other line alone", () => {
+    const result = setTaskDue(NOTE, "배포 확인", "2026-10-23");
+    expect(result.changed).toBe(true);
+    expect(line(result.content, 4)).toBe("- [ ] **배포 확인** 📅 2026-10-23");
+    expect(result.content.split("\n").filter((_, i) => i !== 4)).toEqual(NOTE.split("\n").filter((_, i) => i !== 4));
+  });
+
+  it("setTaskDue replaces an existing 📅 date where it stands, in either date form", () => {
+    expect(line(setTaskDue(NOTE, "결제 오류 재현하기", "2026-10-23").content, 5)).toBe(
+      "- [ ] 결제 오류 📅 2026-10-23 재현하기",
+    );
+    // 줄 끝 공백은 볼트 mutation 검증(git diff --check)이 거부하므로 고친 줄에서는 뗀다.
+    expect(line(setTaskDue(NOTE, "가격 정책 정리", "2026-10-23").content, 6)).toBe(
+      "* [ ] [[가격 정책]] 정리 📅 2026-10-23",
+    );
+  });
+
+  it("dropTask marks the line cancelled with the date, keeping the text and an existing 📅", () => {
+    expect(line(dropTask(NOTE, "배포 확인", "2026-10-16").content, 4)).toBe("- [-] **배포 확인** ❌ 2026-10-16");
+    const dated = dropTask(NOTE, "가격 정책 정리", "2026-10-16");
+    expect(line(dated.content, 6)).toBe("* [-] [[가격 정책]] 정리 📅 2026-09-01 ❌ 2026-10-16");
+    // 버린 줄은 더 이상 열린 할 일이 아니다.
+    expect(findOpenTask(dated.content.split("\n"), "가격 정책 정리")).toBe(-1);
+    expect(dropTask(dated.content, "가격 정책 정리", "2026-10-16").changed).toBe(false);
+  });
+
+  it("leaves the note unchanged when the line is missing, done, outside the section or already so", () => {
+    for (const missing of ["없는 일", "끝낸 일", "구획 밖의 일"]) {
+      expect(setTaskDue(NOTE, missing, "2026-10-23")).toEqual({ content: NOTE, changed: false });
+      expect(dropTask(NOTE, missing, "2026-10-16")).toEqual({ content: NOTE, changed: false });
+    }
+    // 이미 그 날짜가 적힌 줄을 다시 쓰면 빈 커밋이 되어 mutation 이 실패한다.
+    const dated = setTaskDue(NOTE, "배포 확인", "2026-10-23").content;
+    expect(setTaskDue(dated, "배포 확인", "2026-10-23")).toEqual({ content: dated, changed: false });
   });
 });
 
