@@ -58,55 +58,55 @@ it("normalizes task text like the Mac vault parser", () => {
 });
 
 describe("upsertAutoLog", () => {
-  const DATE = "2026-10-11";
   const BODY = "### 코드\n- **todari-ops** 2건: feat: a; fix: b";
-  const NEW_NOTE =
-    "---\ntype: 데일리\n날짜: 2026-10-11\n---\n## 자동 기록\n\n### 코드\n- **todari-ops** 2건: feat: a; fix: b\n\n## 메모\n";
+  const NEXT = `${BODY}\n### 운영\n- 배포 1건 (lvti)`;
+  const NEW_NOTE = `## 자동 기록\n\n${BODY}\n\n## 메모\n`;
+  const TEMPLATE = "## 할 일\n- [ ] \n\n## 인박스\n\n## 메모\n"; // 볼트의 템플릿/데일리.md
 
-  it("creates the daily note with frontmatter and an empty 메모 section", () => {
-    expect(upsertAutoLog(null, DATE, BODY)).toEqual({ content: NEW_NOTE, changed: true });
-    expect(upsertAutoLog("\n", DATE, BODY).content).toBe(NEW_NOTE); // 빈 파일도 새 노트로 본다
+  it("creates a note of just the 자동 기록 section and an empty 메모, with nothing above the first heading", () => {
+    expect(upsertAutoLog(null, BODY)).toEqual({ content: NEW_NOTE, changed: true });
+    expect(upsertAutoLog("\n", BODY).content).toBe(NEW_NOTE); // 빈 파일도 새 노트로 본다
   });
 
   it("replaces only the 자동 기록 section and keeps the text below it byte for byte", () => {
-    const mine = "오늘은 배포가 많았다.  \n\n# 회의\n- 메모\n"; // 줄 끝 공백까지 사람이 쓴 그대로
-    const next = "### 코드\n- **lvti** 1건: fix: c\n### 운영\n- 배포 1건 (lvti)";
-    const result = upsertAutoLog(NEW_NOTE + mine, DATE, next);
-    expect(result).toEqual({
-      content: `---\ntype: 데일리\n날짜: 2026-10-11\n---\n## 자동 기록\n\n${next}\n\n## 메모\n${mine}`,
-      changed: true,
-    });
-    expect(upsertAutoLog(result.content, DATE, next).changed).toBe(false);
+    const mine = "오늘은 배포가 많았다.  \n\n# 회의\n- 메모"; // 줄 끝 공백도, 끝에 줄바꿈이 없는 것도 그대로
+    const result = upsertAutoLog(NEW_NOTE + mine, NEXT);
+    expect(result).toEqual({ content: `## 자동 기록\n\n${NEXT}\n\n## 메모\n${mine}`, changed: true });
+    expect(upsertAutoLog(result.content, NEXT).changed).toBe(false);
   });
 
   it("stops at the next level-1 or level-2 heading, not at its own ### headings", () => {
-    const note = `## 자동 기록\n\n${BODY}\n### 운영\n- 배포 1건\n# 회의\n- 사람이 쓴 메모\n`;
-    expect(upsertAutoLog(note, DATE, BODY).content).toBe(
-      `## 자동 기록\n\n${BODY}\n\n# 회의\n- 사람이 쓴 메모\n`,
+    const note = `## 자동 기록\n\n${NEXT}\n# 회의\n- 사람이 쓴 메모\n`;
+    expect(upsertAutoLog(note, BODY).content).toBe(`## 자동 기록\n\n${BODY}\n\n# 회의\n- 사람이 쓴 메모\n`);
+  });
+
+  it("puts a missing section at the very top and leaves the rest of the note byte for byte", () => {
+    expect(upsertAutoLog(TEMPLATE, BODY).content).toBe(`## 자동 기록\n\n${BODY}\n\n${TEMPLATE}`);
+    const loose = "\n아침 메모  \n## 할 일\n- [ ] 장보기"; // 빈 줄로 시작하고 줄바꿈 없이 끝난다
+    expect(upsertAutoLog(loose, BODY).content).toBe(`## 자동 기록\n\n${BODY}\n${loose}`);
+    // 사람이 둔 frontmatter 는 맨 위에 있어야만 frontmatter 다. 그 바로 뒤에 넣는다.
+    expect(upsertAutoLog("---\ntags: [a]\n---\n\n아침 메모\n", BODY).content).toBe(
+      `---\ntags: [a]\n---\n## 자동 기록\n\n${BODY}\n\n아침 메모\n`,
     );
   });
 
-  it("inserts the section after the frontmatter, or at the top when there is none", () => {
-    expect(upsertAutoLog("---\ntags: [a]\n---\n\n아침 메모\n", DATE, BODY).content).toBe(
-      `---\ntags: [a]\n---\n## 자동 기록\n\n${BODY}\n\n아침 메모\n`,
-    );
-    const template = "## 할 일\n- [ ] \n\n## 인박스\n\n## 메모\n";
-    expect(upsertAutoLog(template, DATE, BODY).content).toBe(`## 자동 기록\n\n${BODY}\n\n${template}`);
+  it("still owns exactly its section after a union merge joined its note with the Mac's", () => {
+    // 볼트는 데일리/*.md 를 git union 드라이버로 병합한다: 양쪽이 같은 날 노트를 만들면 줄이 이어 붙는다.
+    for (const merged of [TEMPLATE + NEW_NOTE, NEW_NOTE + TEMPLATE]) {
+      expect(upsertAutoLog(merged, NEXT).content).toBe(merged.replace(BODY, NEXT));
+    }
   });
 
   it("adds no trailing whitespace and no extra blank lines at the end of the file", () => {
     // 둘 다 볼트 mutation 검증(git diff --check)이 거부한다.
     const messy = "### 코드  \n- **todari-ops** 2건: feat: a; fix: b \n\n";
-    expect(upsertAutoLog("---\ntype: 데일리\n---\n", DATE, messy).content).toBe(
-      `---\ntype: 데일리\n---\n## 자동 기록\n\n${BODY}\n`,
-    );
-    expect(upsertAutoLog(`## 자동 기록\n\n- 예전 기록\n\n\n`, DATE, messy).content).toBe(
-      `## 자동 기록\n\n${BODY}\n`,
-    );
+    expect(upsertAutoLog(null, messy).content).toBe(NEW_NOTE);
+    expect(upsertAutoLog("## 자동 기록\n\n- 예전 기록\n\n\n", messy).content).toBe(`## 자동 기록\n\n${BODY}\n`);
+    expect(upsertAutoLog("---\ntags: [a]\n---", messy).content).toBe(`---\ntags: [a]\n---\n## 자동 기록\n\n${BODY}\n`);
   });
 
   it("writes nothing for an empty body", () => {
-    expect(upsertAutoLog(NEW_NOTE, DATE, " \n")).toEqual({ content: NEW_NOTE, changed: false });
-    expect(upsertAutoLog(null, DATE, "")).toEqual({ content: "", changed: false });
+    expect(upsertAutoLog(NEW_NOTE, " \n")).toEqual({ content: NEW_NOTE, changed: false });
+    expect(upsertAutoLog(null, "")).toEqual({ content: "", changed: false });
   });
 });

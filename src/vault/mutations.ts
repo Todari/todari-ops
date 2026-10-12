@@ -213,7 +213,7 @@ async function writeVaultDailyLogNow(date: string, body: string): Promise<VaultM
     const relative = `데일리/${date}.md`;
     const file = await resolveCreatablePath(dir, relative);
     const previous = await readFile(file, "utf8").catch(() => null);
-    const edit = upsertAutoLog(previous, date, body);
+    const edit = upsertAutoLog(previous, body);
     if (edit.changed) await writeFile(file, edit.content);
     const files = edit.changed ? await validateChanges(dir) : [];
     if (files.length === 0) {
@@ -430,21 +430,16 @@ async function commitAndPush(
   files: string[],
   message: string,
 ): Promise<string> {
+  // 컨테이너에는 git 신원 설정이 없다. 커밋을 만드는 명령마다 봇의 이름을 넘긴다.
+  const asBot = ["-c", `user.name=${BOT_NAME}`, "-c", `user.email=${BOT_EMAIL}`];
   await git(dir, ["add", "--", ...files]);
-  await git(dir, [
-    "-c",
-    `user.name=${BOT_NAME}`,
-    "-c",
-    `user.email=${BOT_EMAIL}`,
-    "commit",
-    "-m",
-    message,
-  ]);
+  await git(dir, [...asBot, "commit", "-m", message]);
   try {
     await git(dir, ["push", "origin", "main"]);
   } catch (firstError) {
     try {
-      await git(dir, ["pull", "--rebase", "origin", "main"]);
+      // rebase 도 커밋을 새로 만든다. 신원 없이는 맥이 먼저 push 한 날의 재시도가 늘 실패한다.
+      await git(dir, [...asBot, "pull", "--rebase", "origin", "main"]);
       await git(dir, ["push", "origin", "main"]);
     } catch (retryError) {
       await git(dir, ["rebase", "--abort"]).catch(() => undefined);

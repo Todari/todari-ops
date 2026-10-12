@@ -66,10 +66,14 @@ describe("daily log in the vault checkout", { timeout: 30_000 }, () => {
     isolateGit();
   }
   const macPush = () => git(mac, "push", "--quiet", "origin", "main");
-  // 개발자 PC의 전역 git 설정(서명·훅·템플릿)이 끼어들지 않게 한다.
+  // 개발자 PC의 전역 git 설정(서명·훅·템플릿)이 끼어들지 않게 하고, 봇 컨테이너처럼 git 이 커밋 신원을
+  // 추측하지 못하게 한다(전역 설정이 없고 호스트 이름으로는 이메일을 만들 수 없다).
   const isolateGit = () => {
     vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
     vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "user.useConfigOnly");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "true");
   };
   const published = (file: string) => git(origin, "show", `main:${file}`);
   const head = () => git(origin, "log", "-1", "--format=%H|%an|%s", "main").trim();
@@ -84,6 +88,7 @@ describe("daily log in the vault checkout", { timeout: 30_000 }, () => {
     git(root, "init", "--quiet", "--initial-branch=main", mac);
     git(mac, "remote", "add", "origin", origin);
     macCommit("2026-10-10T10:00:00+09:00", {
+      ".gitattributes": "데일리/*.md merge=union\n", // 볼트의 실제 설정: 같은 날 노트는 양쪽 줄을 모두 남긴다
       "데일리/2026-10-10.md": TEMPLATE,
       "프로젝트/todari-ops.md": "## 다음 할 일\n",
     });
@@ -113,9 +118,7 @@ describe("daily log in the vault checkout", { timeout: 30_000 }, () => {
   it("creates the note, then replaces only its own section after the owner edits it", async () => {
     const created = await writeVaultDailyLog("2026-10-11", BODY);
     expect(created).toMatchObject({ changed: true, path: "데일리/2026-10-11.md" });
-    expect(published("데일리/2026-10-11.md")).toBe(
-      `---\ntype: 데일리\n날짜: 2026-10-11\n---\n## 자동 기록\n\n${BODY}\n\n## 메모\n`,
-    );
+    expect(published("데일리/2026-10-11.md")).toBe(`## 자동 기록\n\n${BODY}\n\n## 메모\n`);
     expect(head()).toMatch(/\|todari-ops\[bot\]\|vault: daily log 2026-10-11 via todari-ops$/);
 
     // 사람이 Mac 에서 메모를 덧붙여 push 한 뒤, 봇이 같은 날 기록을 다시 쓴다.
@@ -135,6 +138,29 @@ describe("daily log in the vault checkout", { timeout: 30_000 }, () => {
   it("adds the section to a note the owner already started from the template", async () => {
     await writeVaultDailyLog("2026-10-10", BODY);
     expect(published("데일리/2026-10-10.md")).toBe(`## 자동 기록\n\n${BODY}\n\n${TEMPLATE}`);
+  });
+
+  it("keeps both sides' lines when the Mac pushes the same day's note while the bot is writing", async () => {
+    // 봇이 커밋한 직후(push 전)에 맥이 같은 날 노트를 올리는 경합을 post-commit 훅으로 만든다.
+    const mine = TEMPLATE.replace("## 인박스\n", "## 인박스\n- 맥에서 적은 줄\n");
+    git(mac, "pull", "--quiet", "--no-rebase", "--no-edit", "origin", "main");
+    macCommit("2026-10-14T00:39:00+09:00", { "데일리/2026-10-13.md": mine });
+    writeFileSync(
+      join(root, "work", "vault", ".git", "hooks", "post-commit"),
+      `#!/bin/sh\nrm -- "$0"\nunset $(git rev-parse --local-env-vars)\nexec git -C "${mac}" push --quiet origin main\n`,
+      { mode: 0o755 },
+    );
+
+    expect((await writeVaultDailyLog("2026-10-13", BODY)).changed).toBe(true);
+    const merged = published("데일리/2026-10-13.md");
+    expect(merged).not.toMatch(/^[<=>]{7}/m); // 충돌 표식 없이
+    expect(merged.split("\n")).toEqual(expect.arrayContaining([...mine.split("\n"), ...BODY.split("\n")]));
+    expect(merged).toContain(`## 자동 기록\n\n${BODY}\n`); // 봇의 구획은 흩어지지 않고
+    expect(merged.startsWith("## ")).toBe(true); // 이어 붙은 결과도 제목으로 시작하는 구획들뿐이다
+
+    const next = `${BODY}\n### 운영\n- 배포 1건 (lvti)`;
+    await writeVaultDailyLog("2026-10-13", next);
+    expect(published("데일리/2026-10-13.md")).toBe(merged.replace(BODY, next));
   });
 
   it("refuses a date that is not a calendar day", async () => {
