@@ -2,7 +2,7 @@ import { MessageFlags } from "discord.js";
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterAll, expect, it, vi } from "vitest";
-import { getInstagramBrief, saveInstagramBrief, updateStatusBoard } from "./status-board.js";
+import { getInstagramBrief, readInstagramBrief, saveInstagramBrief, updateStatusBoard } from "./status-board.js";
 
 const mocks = vi.hoisted(() => ({
   env: {
@@ -70,7 +70,10 @@ it("posts the board once, then rewrites that message, and reposts only when it w
 it("keeps the watchdog brief for the morning digest and flags it once the watchdog went quiet", () => {
   const at = Date.parse("2026-10-09T08:22:00+09:00");
   expect(getInstagramBrief(at)).toBeNull();
+  expect(readInstagramBrief()).toBeNull();
   saveInstagramBrief("어제 게시: 1/3건", at);
+  // 자동 데일리 기록은 경고 문구 없는 원문과 받은 시각을 읽는다.
+  expect(readInstagramBrief()).toEqual({ brief: "어제 게시: 1/3건", at });
   expect(getInstagramBrief(at + 8 * 60_000)).toBe("어제 게시: 1/3건");
   expect(getInstagramBrief(at + 3 * 3600_000)).toBe(
     `⚠️ 워치독 현황이 <t:${at / 1000}:R> 이후 오지 않았습니다.\n어제 게시: 1/3건`,

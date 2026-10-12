@@ -14,7 +14,7 @@ import path from "node:path";
 import { env } from "../env.js";
 import { captureException } from "../observability/sentry.js";
 import { githubAuthEnv } from "../workspaces/checkout.js";
-import { appendIdea, completeTask, insertTask } from "./editor.js";
+import { appendIdea, completeTask, insertTask, upsertAutoLog } from "./editor.js";
 import { ensureVaultCheckout } from "./repo.js";
 import { todayKst } from "./state.js";
 
@@ -60,6 +60,35 @@ export function applyVaultCapture(
 
 export function completeVaultTask(ref: VaultTaskRef): Promise<VaultMutationResult> {
   return serialize(() => completeVaultTaskNow(ref));
+}
+
+/** 그날의 자동 기록을 `데일리/YYYY-MM-DD.md`에 쓴다. 다른 볼트 쓰기와 같은 큐·검증·push 를 탄다. */
+export function writeVaultDailyLog(date: string, body: string): Promise<VaultMutationResult> {
+  return serialize(() => writeVaultDailyLogNow(date, body));
+}
+
+/**
+ * 그 기간([since, until) ms, 커밋 시각 기준)에 볼트에 새로 생긴 Markdown 경로.
+ * pull 이 checkout 을 움직이므로 쓰기와 같은 큐에서 읽는다.
+ */
+export function listVaultNotesAdded(since: number, until: number): Promise<string[]> {
+  return serialize(async () => {
+    const dir = await ensureVaultCheckout();
+    const iso = (ms: number) => new Date(ms).toISOString().slice(0, 19) + "Z";
+    const out = await git(dir, [
+      "-c",
+      "core.quotepath=false",
+      "log",
+      `--since=${iso(since)}`,
+      `--until=${iso(until - 1000)}`,
+      "--diff-filter=A",
+      "--name-only",
+      "--format=",
+      "--",
+      "*.md",
+    ]);
+    return [...new Set(out.split("\n").filter(Boolean))];
+  });
 }
 
 export function noteNameForProject(projectSlug: string | undefined): string {
@@ -173,6 +202,33 @@ async function completeVaultTaskNow(ref: VaultTaskRef): Promise<VaultMutationRes
   } catch (err) {
     await discardVaultCheckout(dir).catch(() => undefined);
     captureException(err, { kind: "vault-task-complete", projectSlug: ref.projectSlug });
+    throw err;
+  }
+}
+
+async function writeVaultDailyLogNow(date: string, body: string): Promise<VaultMutationResult> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`invalid daily log date: ${date}`);
+  const dir = await prepareVault();
+  try {
+    const relative = `데일리/${date}.md`;
+    const file = await resolveCreatablePath(dir, relative);
+    const previous = await readFile(file, "utf8").catch(() => null);
+    const edit = upsertAutoLog(previous, date, body);
+    if (edit.changed) await writeFile(file, edit.content);
+    const files = edit.changed ? await validateChanges(dir) : [];
+    if (files.length === 0) {
+      return { changed: false, path: relative, summary: "자동 기록이 이미 같은 내용입니다." };
+    }
+    const commit = await commitAndPush(dir, files, `vault: daily log ${date} via todari-ops`);
+    return {
+      changed: true,
+      path: relative,
+      summary: `${relative}에 자동 기록을 썼습니다.`,
+      commit,
+    };
+  } catch (err) {
+    await discardVaultCheckout(dir).catch(() => undefined);
+    captureException(err, { kind: "vault-daily-log", date });
     throw err;
   }
 }

@@ -68,12 +68,17 @@ export function saveInstagramBrief(brief: string, now = Date.now()): void {
   writeJsonObject(FILE, { ...readJsonObject<string>(FILE), brief, briefAt: new Date(now).toISOString() });
 }
 
+/** 보관 중인 실적 원문과 받은 시각. 자동 데일리 기록이 "어느 날의 실적인지" 가리는 데 쓴다. */
+export function readInstagramBrief(): { brief: string; at: number } | null {
+  const { brief, briefAt } = readJsonObject<string>(FILE);
+  return brief ? { brief, at: Date.parse(briefAt ?? "") } : null;
+}
+
 /** 아침 다이제스트에 넣을 인스타 게시 실적. 워치독이 오래 조용했으면 그 사실을 앞에 적는다. */
 export function getInstagramBrief(now = Date.now()): string | null {
-  const { brief, briefAt } = readJsonObject<string>(FILE);
-  if (!brief) return null;
-  const at = Date.parse(briefAt ?? "");
-  return now - at > BRIEF_STALE_MS
-    ? `⚠️ 워치독 현황이 <t:${Math.floor(at / 1000)}:R> 이후 오지 않았습니다.\n${brief}`
-    : brief;
+  const saved = readInstagramBrief();
+  if (!saved) return null;
+  return now - saved.at > BRIEF_STALE_MS
+    ? `⚠️ 워치독 현황이 <t:${Math.floor(saved.at / 1000)}:R> 이후 오지 않았습니다.\n${saved.brief}`
+    : saved.brief;
 }

@@ -8,6 +8,7 @@ import { captureException } from "../observability/sentry.js";
 import { putPendingAction } from "../webhook/pending.js";
 import { ghJson } from "../github/api.js";
 import { getTodayFirstTask } from "../checkin/index.js";
+import { yesterdayLogSummary } from "../daily-log/index.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 import {
   collectDeadlines,
@@ -81,6 +82,10 @@ export async function postDigest(): Promise<boolean> {
   if (firstTask) {
     embed.addFields({ name: "🎯 오늘 첫 작업 (어제 체크인)", value: truncate(firstTask, 1000) });
   }
+
+  // 밤사이 봇이 볼트 데일리 노트에 쓴 어제 기록(자동 데일리 기록)의 요약 한 줄.
+  const logged = yesterdayLogSummary();
+  if (logged) embed.addFields({ name: "📓 어제 기록", value: logged });
 
   // --- vault snapshot (Mac cron + bot-side task mutations; may be absent/stale) ---
   const vault = getVaultState();

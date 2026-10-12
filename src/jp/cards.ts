@@ -78,6 +78,18 @@ export async function recentDailyFronts(days: number): Promise<string[]> {
     .filter((f): f is string => Boolean(f));
 }
 
+/**
+ * 그 시간대에 푸시된 "오늘의 표현" 카드. dailyLog 의 키는 푸시 시각의 UTC 날짜라
+ * KST 날짜와 하루 어긋날 수 있어 카드 생성 시각으로 고른다.
+ */
+export function dailyCardBetween(start: number, end: number): JpCard | undefined {
+  const pushed = new Set(Object.values(data.dailyLog));
+  return data.cards.find((c) => {
+    const at = Date.parse(c.createdAt);
+    return pushed.has(c.id) && at >= start && at < end;
+  });
+}
+
 export async function logDaily(date: string, cardId: number): Promise<void> {
   data.dailyLog[date] = cardId;
   await persist();

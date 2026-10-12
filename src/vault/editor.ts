@@ -100,3 +100,37 @@ export function normalizeTaskText(value: string): string {
 function collapseBlankLines(value: string): string {
   return value.replace(/\n{3,}/g, "\n\n");
 }
+
+const AUTO_LOG_HEADING = "## 자동 기록";
+
+/**
+ * 데일리 노트에서 봇이 쓰는 `## 자동 기록` 구획만 갈아 끼운다(다음 `# `·`## ` 제목 앞까지).
+ * 구획 밖에 사람이 쓴 글은 그대로 둔다. 구획이 없으면 frontmatter 바로 뒤에 넣고,
+ * 노트가 없으면(null·빈 파일) 빈 `## 메모`를 갖춘 새 노트를 만든다.
+ */
+export function upsertAutoLog(content: string | null, date: string, body: string): EditResult {
+  if (!body.trim()) return { content: content ?? "", changed: false };
+  // 줄 끝 공백과 파일 끝에 늘어난 빈 줄은 mutation 검증(git diff --check)에 걸려 기록이 통째로 버려진다.
+  const block = [AUTO_LOG_HEADING, "", ...body.trim().split("\n").map((line) => line.trimEnd())];
+  if (!content?.trim()) {
+    const lines = ["---", "type: 데일리", `날짜: ${date}`, "---", ...block, "", "## 메모", ""];
+    return { content: lines.join("\n"), changed: true };
+  }
+
+  const lines = content.split("\n");
+  let start = lines.findIndex((line) => line.trim() === AUTO_LOG_HEADING);
+  let end: number;
+  if (start >= 0) {
+    const nextHeading = lines.findIndex((line, i) => i > start && /^#{1,2} /.test(line));
+    end = nextHeading < 0 ? lines.length : nextHeading;
+  } else {
+    // 구획이 아직 없다: frontmatter 가 있으면 그 바로 뒤, 없으면 맨 위.
+    start = end = lines[0]?.trim() === "---" ? lines.indexOf("---", 1) + 1 : 0;
+  }
+  const after = lines.slice(end);
+  // 뒤따르는 본문과는 한 줄 띄운다. 이미 빈 줄이거나 파일 끝이면 더하지 않는다.
+  if (after[0]?.trim()) block.push("");
+  const joined = [...lines.slice(0, start), ...block, ...after].join("\n");
+  const updated = joined.endsWith("\n") ? joined : joined + "\n";
+  return { content: updated, changed: updated !== content };
+}

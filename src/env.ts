@@ -42,6 +42,13 @@ export const env = {
   // 명시한 경우 모델을 고정한다. 미설정이면 작업별 모델 정책을 적용한다.
   CLAUDE_MODEL: process.env.CLAUDE_MODEL ?? "",
   CHECKIN_TIME: process.env.CHECKIN_TIME ?? "21:30", // KST HH:MM, empty = disabled
+  // 자동 데일리 기록(docs/daily-log.md). 이 시각에 "어제" 하루를 볼트 데일리 노트로 쓴다.
+  DAILY_LOG_TIME: process.env.DAILY_LOG_TIME ?? "00:40", // KST HH:MM, empty = disabled
+  // 커밋을 모을 GitHub 소유자(쉼표 구분). 비면 카탈로그 레포의 소유자들.
+  DAILY_LOG_OWNERS: (process.env.DAILY_LOG_OWNERS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? "",
   VAULT_REPO_URL:
     process.env.VAULT_REPO_URL ??

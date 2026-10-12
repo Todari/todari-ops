@@ -7,7 +7,7 @@ import { join } from "node:path";
 const mocks = vi.hoisted(() => ({
   env: {
     WORK_DIR: "", DIGEST_TIME: "08:30", DIGEST_CHANNEL_ID: "daily", ALERTS_CHANNEL_ID: "",
-    CHECKIN_TIME: "21:30", JP_PUSH_HOUR: 8, JP_PUSH_MINUTE: 10,
+    CHECKIN_TIME: "21:30", JP_PUSH_HOUR: 8, JP_PUSH_MINUTE: 10, DAILY_LOG_OWNERS: [], VAULT_REPO_URL: "",
   },
   send: vi.fn(),
 }));
@@ -25,6 +25,8 @@ vi.mock("../jp/tutor.js", () => ({
   generateDailyPhrase: async () => ({ front: "お疲れ様", reading: "おつかれさま", meaning: "수고했어요", example: "", exampleKo: "", note: "" }),
 }));
 vi.mock("../jp/cards.js", () => ({ insertCard: async () => 1, logDaily: async () => {}, recentDailyFronts: async () => [] }));
+// 체크인의 "오늘 한 일"이 볼트 checkout(실제 git)을 건드리지 않게 한다.
+vi.mock("../vault/mutations.js", () => ({ listVaultNotesAdded: async () => [] }));
 
 // 2026-10-09 는 금요일(KST). 예약: 일본어 08:10 · 다이제스트 08:30 · 주간 금 18:00 · 체크인 21:30.
 const kst = (hhmm: string, date = "2026-10-09") => Date.parse(`${date}T${hhmm}:00+09:00`);
@@ -109,6 +111,19 @@ it("does not count a manual post as the scheduled one", async () => {
   expect(saved().digest).toBe("2026-10-08");
   await vi.advanceTimersByTimeAsync(3600_000);
   expect(posted()).toEqual(["digest", "digest"]);
+});
+
+it("shows last night's auto daily log in the digest only while it is yesterday's", async () => {
+  writeFileSync(join(root, "daily-log.json"), JSON.stringify({ date: "2026-10-08", summary: "커밋 12 · 배포 3 · 새 노트 2" }));
+  await boot(kst("08:20"));
+  const { postDigest } = await import("../digest/daily.js");
+  await postDigest();
+  expect(JSON.stringify(mocks.send.mock.calls.at(-1))).toContain(
+    '{"name":"📓 어제 기록","value":"커밋 12 · 배포 3 · 새 노트 2 → 볼트 데일리/2026-10-08.md"}',
+  );
+  vi.setSystemTime(kst("08:20", "2026-10-10")); // 10-09 밤에는 쓸 근거가 없었다
+  await postDigest();
+  expect(JSON.stringify(mocks.send.mock.calls.at(-1))).not.toContain("어제 기록");
 });
 
 it("does not catch up without an earlier record or on a later day", async () => {

@@ -219,10 +219,11 @@ async function handleStatus(interaction: ChatInputCommandInteraction): Promise<v
 }
 
 async function handleCheckin(interaction: ChatInputCommandInteraction): Promise<void> {
+  // 프롬프트가 오늘 한 일을 모으느라(GitHub·볼트) 3초를 넘길 수 있다.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const posted = await postCheckinPrompt();
-  await interaction.reply({
+  await interaction.editReply({
     content: posted ? "🌙 체크인 프롬프트 게시됨" : "⚠️ 다이제스트 채널을 찾을 수 없음",
-    flags: MessageFlags.Ephemeral,
   });
 }
 

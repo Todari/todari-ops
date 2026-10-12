@@ -11,7 +11,7 @@ import {
   OPS_BUTTON_ID,
   requestProblemAction,
 } from "../webhook/instagram-handler.js";
-import { buildCheckinModal } from "../checkin/index.js";
+import { buildCheckinModal, pickTomorrowFirstTask } from "../checkin/index.js";
 import { fetchInboxChannel } from "../discord/alerts.js";
 import { dueCards, gradeCard } from "../jp/cards.js";
 import type { Grade } from "../jp/srs.js";
@@ -65,6 +65,11 @@ export async function handleButton(interaction: ButtonInteraction): Promise<void
 
   if (kind === "checkin" && action === "open") {
     await interaction.showModal(buildCheckinModal(id ?? ""));
+    return;
+  }
+
+  if (kind === "checkin" && action === "pick") {
+    await pickTomorrowFirstTask(interaction);
     return;
   }
 

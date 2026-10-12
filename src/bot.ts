@@ -17,6 +17,7 @@ import { startDailyDigest } from "./digest/daily.js";
 import { startWeeklySummary } from "./digest/weekly.js";
 import { startReminders } from "./reminders/index.js";
 import { startEveningCheckin } from "./checkin/index.js";
+import { startDailyLog } from "./daily-log/index.js";
 import { scheduleJpPush } from "./jp/daily-push.js";
 import { runtimeHealth } from "./monitor/health.js";
 
@@ -46,6 +47,7 @@ client.once(Events.ClientReady, async (c) => {
   startWeeklySummary();
   startReminders();
   startEveningCheckin();
+  startDailyLog();
   scheduleJpPush(c);
   startContentWorker(c);
   runtimeHealth.markInitialized();
