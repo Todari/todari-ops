@@ -1,6 +1,6 @@
 import type { ActionRowBuilder, ButtonBuilder, ButtonInteraction, EmbedBuilder } from "discord.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,7 +24,7 @@ vi.mock("../webhook/instagram-handler.js", () => ({
   ACK_BUTTON_ID: "igack", OPS_BUTTON_ID: "igops", acknowledgeProblem: vi.fn(), requestProblemAction: vi.fn(),
 }));
 vi.mock("../jp/cards.js", () => ({ dueCards: vi.fn(), gradeCard: vi.fn() }));
-// 볼트 할 일(vault/state)·후보 보관(webhook/pending)·체크인 저장은 실제 구현을 쓴다.
+// 볼트 할 일(vault/state)·후보 보관(checkin-candidates.json)·체크인 저장은 실제 구현이 임시 /data 를 읽고 쓴다.
 
 const PROMPT = "<@owner> 🌙 **저녁 체크인** — 오늘을 3줄로 닫읍시다. 내일 첫 작업은 아침 브리핑 맨 위에 올라갑니다.";
 const LONG_TASK = `워커 메모리 한도 초과 원인 찾기: ${"수집 시작 직후 OOM 이 나는 구간을 좁힌다 ".repeat(6)}끝`;
@@ -129,13 +129,13 @@ it("adds today's evidence and up to three first-task buttons to the unchanged pr
 
 it("saves the tapped candidate in full and swaps the candidate buttons for one line", async () => {
   seedVault([{ note: "linkive-geo", tasks: [{ text: LONG_TASK }] }, { note: "todari-ops", tasks: [{ text: "배포 확인" }] }]);
-  const { postCheckinPrompt, handleButton, getFirstTaskChosenOn, getTodayFirstTask } = await boot(kst("21:30"));
-  await postCheckinPrompt();
+  await (await boot(kst("21:30"))).postCheckinPrompt();
   const picked = posted().buttons[1]!;
   const full = `linkive-geo · ${LONG_TASK}`;
   expect(picked.label).not.toBe(`🎯 ${full}`); // 라벨은 잘렸다
 
-  vi.setSystemTime(kst("00:30", "2026-10-13")); // 자정을 넘겨 눌러도 그 저녁의 체크인이다
+  // 저녁 배포로 봇이 재시작한 뒤에, 자정을 넘겨 눌러도 그 저녁의 체크인이다.
+  const { handleButton, getFirstTaskChosenOn, getTodayFirstTask } = await boot(kst("00:30", "2026-10-13"));
   const { interaction, press } = click(picked.id);
   await press(handleButton);
 
@@ -172,6 +172,35 @@ it("answers an expired, unknown or foreign pick privately without saving anythin
     });
   }
   expect(getFirstTaskChosenOn("2026-10-12")).toBeNull();
+});
+
+it("keeps an earlier prompt's buttons alive after a second /checkin and forgets candidates after a week", async () => {
+  seedVault([{ note: "todari-ops", tasks: [{ text: "배포 확인" }] }]);
+  writeFileSync(join(root, "checkin-candidates.json"), JSON.stringify({
+    "2026-10-04": { aaaa1111: { label: "여드레 전 후보", at: kst("21:30", "2026-10-04") } },
+    "2026-10-05": { bbbb2222: { label: "이레 전 후보", at: kst("21:30", "2026-10-05") } },
+  }));
+  const { postCheckinPrompt, handleButton, getFirstTaskChosenOn } = await boot(kst("21:30"));
+  await postCheckinPrompt();
+  const first = posted().buttons[1]!;
+  await postCheckinPrompt(); // 같은 저녁의 수동 /checkin
+  const second = posted().buttons[1]!;
+  expect(second.id).not.toBe(first.id);
+
+  const stored = JSON.parse(readFileSync(join(root, "checkin-candidates.json"), "utf8")) as Record<string, object>;
+  expect(Object.keys(stored)).toEqual(["2026-10-05", "2026-10-12"]);
+  expect(stored["2026-10-12"]).toEqual({
+    [first.id.split(":")[3]!]: { label: "todari-ops · 배포 확인", at: kst("21:30") },
+    [second.id.split(":")[3]!]: { label: "todari-ops · 배포 확인", at: kst("21:30") },
+  });
+
+  await click(first.id).press(handleButton);
+  expect(getFirstTaskChosenOn("2026-10-12")).toBe("todari-ops · 배포 확인");
+  // 지난 저녁의 후보는 파일에 남아 있어도 12시간이 지나 받지 않는다.
+  const stale = click("checkin:pick:2026-10-05:bbbb2222");
+  await stale.press(handleButton);
+  expect(stale.interaction.reply).toHaveBeenCalledWith({ content: expect.stringContaining("만료"), flags: 64 });
+  expect(getFirstTaskChosenOn("2026-10-05")).toBeNull();
 });
 
 it("posts the plain prompt when there is no evidence and no vault snapshot", async () => {

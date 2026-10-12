@@ -9,6 +9,7 @@ import {
   TextInputStyle,
   type ButtonInteraction,
 } from "discord.js";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -16,12 +17,12 @@ import { env } from "../env.js";
 import { clip, collectActivity, renderSections, type DayEvidence } from "../daily-log/evidence.js";
 import { fetchDigestChannel, ownerMention } from "../discord/alerts.js";
 import { findProjectByRepoFullName } from "../projects.js";
-import { getVaultState, todayKst, type VaultState } from "../vault/state.js";
+import { addDays, getVaultState, todayKst, type VaultState } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
+import { readJsonObject, writeJsonObject } from "../storage/json-file.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 import { withoutSnoozed } from "../task-loop/tidy.js";
 import { todayDoneRows, todayPicksField } from "../task-loop/today.js";
-import { getPendingAction, putPendingAction } from "../webhook/pending.js";
 
 // 저녁 체크인: 21:30(KST) #daily 에 [회고 쓰기] 버튼 → 모달(오늘/막힘/내일)
 // → 제출 내용은 📥 인박스로 가서 스위퍼가 데일리 노트에 기록하고,
@@ -35,7 +36,13 @@ interface CheckinState {
   tomorrow: string;
 }
 
+/** 한 저녁에 올린 "내일 첫 작업" 후보들: 버튼 id → 후보 원문과 올린 시각. 파일에는 저녁의 KST 날짜별로 둔다. */
+type Offered = Record<string, { label: string; at: number }>;
+
 const FILE = path.resolve(env.WORK_DIR, "..", "checkin.json");
+// 후보 버튼이 저녁 배포(봇 재시작)를 넘기도록 메모리가 아니라 /data 에 둔다.
+const CANDIDATES_FILE = path.resolve(env.WORK_DIR, "..", "checkin-candidates.json");
+const KEEP_CANDIDATE_DAYS = 7;
 // 후보 버튼은 다음 날 아침 다이제스트 전까지 눌러도 된다.
 const PICK_TTL_MS = 12 * 3600_000;
 // 근거 수집(GitHub 검색·볼트 pull)이 늦어도 프롬프트는 제때 나가야 한다.
@@ -113,28 +120,36 @@ async function oneTapExtras(
     const active = (activity?.commits ?? []).map(
       (repo) => findProjectByRepoFullName(repo.fullName)?.slug ?? repo.repo,
     );
-    // 긴 한글 문장이 잘리지 않게 후보마다 한 줄을 쓴다.
-    // ponytail: 후보 원문은 메모리(putPendingAction)에 둔다 — 봇이 재시작하면 버튼이 만료된다.
-    // 배포가 저녁과 자주 겹치면 /data 에 보관하도록 바꾼다.
+    // 긴 한글 문장이 잘리지 않게 후보마다 한 줄을 쓴다. 라벨은 잘려도 원문은 /data 에 남는다.
     // 보류(4주)한 할 일은 후보로 권하지 않는다.
-    const rows = (vault ? firstTaskCandidates(withoutSnoozed(vault), active) : []).map((task) => {
-      const id = putPendingAction(
-        { projectSlug: "vault", threadName: "checkin-pick", prompt: task },
-        PICK_TTL_MS,
-      );
-      return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    const candidates = vault ? firstTaskCandidates(withoutSnoozed(vault), active) : [];
+    const rows = offerCandidates(date, candidates).map(([id, task]) =>
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(`checkin:pick:${date}:${id}`)
           .setLabel(clip(`🎯 ${task}`, 78))
           .setStyle(ButtonStyle.Secondary),
-      );
-    });
+      ),
+    );
     // 모달 버튼 1줄 + 후보 최대 3줄 + 완료 버튼 1줄 = Discord 한도인 5줄.
     return { embeds, rows: [...rows, ...todayDoneRows(date)] };
   } catch (err) {
     console.warn("[checkin] one-tap extras failed:", err);
     return { embeds: [], rows: [] };
   }
+}
+
+/** 후보마다 버튼 id 를 붙여 그 저녁의 후보로 남긴다. 읽고·고치고·쓰기를 한 틱에 끝낸다. */
+function offerCandidates(date: string, candidates: string[]): Array<[id: string, label: string]> {
+  const offered = candidates.map((label): [string, string] => [randomUUID().slice(0, 8), label]);
+  if (offered.length === 0) return offered;
+  const days = readJsonObject<Offered>(CANDIDATES_FILE);
+  const at = Date.now();
+  // 같은 저녁에 수동 /checkin 으로 또 올려도 먼저 올린 메시지의 버튼이 살아 있게 더한다.
+  days[date] = { ...days[date], ...Object.fromEntries(offered.map(([id, label]) => [id, { label, at }])) };
+  const oldest = addDays(date, -KEEP_CANDIDATE_DAYS);
+  writeJsonObject(CANDIDATES_FILE, Object.fromEntries(Object.entries(days).filter(([day]) => day >= oldest)));
+  return offered;
 }
 
 function activitySoFar(date: string): Promise<DayEvidence | null> {
@@ -171,10 +186,12 @@ export function firstTaskCandidates(vault: VaultState, activeSlugs: string[], li
 export async function pickTomorrowFirstTask(interaction: ButtonInteraction): Promise<void> {
   // customId: checkin:pick:<체크인 날짜>:<후보 id> — 자정 넘어 눌러도 그 저녁의 체크인으로 남는다.
   const [, , date, id] = interaction.customId.split(":");
-  const task = id ? getPendingAction(id)?.prompt : undefined;
+  const offered = date && id ? readJsonObject<Offered>(CANDIDATES_FILE)[date]?.[id] : undefined;
+  // 오래된 체크인의 버튼이 그 뒤에 정한 "내일 첫 작업"을 덮지 않게, 올린 지 12시간이 지난 후보는 받지 않는다.
+  const task = offered && Date.now() - offered.at <= PICK_TTL_MS ? offered.label : undefined;
   if (!date || !task) {
     await interaction.reply({
-      content: "이 후보는 만료됨 (12h TTL 또는 봇 재시작) — 📝 회고 쓰기에 적어주세요",
+      content: "이 후보는 만료됨 (12시간) — 📝 회고 쓰기에 적어주세요",
       flags: MessageFlags.Ephemeral,
     });
     return;
