@@ -76,11 +76,15 @@ export function completeTask(content: string, expectedText: string): EditResult 
   return editOpenTask(content, expectedText, (prefix, gap, text) => `${prefix}[x]${gap}${text}`);
 }
 
-/** 할 일 줄에 마감일(` 📅 YYYY-MM-DD`)을 적는다. 이미 📅 날짜가 있으면 그 날짜를 바꾼다. */
+/**
+ * 할 일 줄에 마감일(` 📅 YYYY-MM-DD`)을 적는다. 이미 📅 날짜가 있으면 그 날짜를 바꾼다.
+ * 📅 가 여럿이면 마지막 것만 바꾼다: 앞의 것은 문장 안에 적어 둔 날짜일 수 있다.
+ */
 export function setTaskDue(content: string, expectedText: string, due: string): EditResult {
   return editOpenTask(content, expectedText, (prefix, gap, text) => {
-    const dated = text.match(DATE_MARKER_RE)
-      ? text.replace(DATE_MARKER_RE, `📅 ${due}`)
+    const last = [...text.matchAll(DATE_MARKER_RE)].at(-1);
+    const dated = last
+      ? `${text.slice(0, last.index)}📅 ${due}${text.slice(last.index + last[0].length)}`
       : `${text.trimEnd()} 📅 ${due}`;
     return `${prefix}[ ]${gap}${dated}`;
   });

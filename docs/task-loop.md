@@ -29,7 +29,7 @@
 
 | 버튼 | 볼트의 그 줄 | 커밋 메시지 |
 |---|---|---|
-| `다음 주` | ` 📅 YYYY-MM-DD`(누른 날 뒤 첫 금요일, 금요일에 누르면 7일 뒤)를 붙인다. 이미 📅 가 있으면 날짜만 바꾼다 | `vault: tidy task (next week) via todari-ops` |
+| `다음 주` | ` 📅 YYYY-MM-DD`(누른 날 뒤 첫 금요일, 금요일에 누르면 7일 뒤)를 붙인다. 이미 📅 가 있으면 날짜만 바꾼다(📅 가 여럿이면 마지막 것만) | `vault: tidy task (next week) via todari-ops` |
 | `보류 4주` | 고치지 않는다 | — |
 | `버림` | `- [ ]` → `- [-]`, 끝에 ` ❌ YYYY-MM-DD`(오늘) | `vault: tidy task (dropped) via todari-ops` |
 

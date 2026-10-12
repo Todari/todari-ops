@@ -109,6 +109,20 @@ describe("tidying a task line", () => {
     );
   });
 
+  it("setTaskDue rewrites only the last 📅 when the line carries two", () => {
+    const note = [
+      "## 다음 할 일",
+      "- [ ] 견적 📅 9/1 받은 것 다시 요청 📅 2026-09-20",
+      "- [ ] 📅 2026-08-12 발표 자료 📅 9/1 까지 정리",
+    ].join("\n");
+    expect(line(setTaskDue(note, "견적 받은 것 다시 요청", "2026-10-23").content, 1)).toBe(
+      "- [ ] 견적 📅 9/1 받은 것 다시 요청 📅 2026-10-23",
+    );
+    expect(line(setTaskDue(note, "발표 자료 까지 정리", "2026-10-23").content, 2)).toBe(
+      "- [ ] 📅 2026-08-12 발표 자료 📅 2026-10-23 까지 정리",
+    );
+  });
+
   it("dropTask marks the line cancelled with the date, keeping the text and an existing 📅", () => {
     expect(line(dropTask(NOTE, "배포 확인", "2026-10-16").content, 4)).toBe("- [-] **배포 확인** ❌ 2026-10-16");
     const dated = dropTask(NOTE, "가격 정책 정리", "2026-10-16");
