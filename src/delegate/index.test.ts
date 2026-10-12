@@ -53,6 +53,7 @@ const kst = (hhmm: string, date = "2026-10-12") => Date.parse(`${date}T${hhmm}:0
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const FIELD = "🤖 위임";
 const WORKFLOW = "/contents/.github/workflows/claude.yml";
+const OPEN_ISSUES = "/issues?state=open&per_page=50";
 const ISSUE = "https://github.com/acme/widgets/issues/7";
 const VAULT: Note[] = [
   { note: "위젯 가게", slug: "widgets", tasks: [{ text: "결제 실패 재시도 추가", due: "2026-10-13" }, { text: "관리자 화면 정렬 버그" }] },
@@ -95,13 +96,17 @@ function seedVault(notes: Note[]) {
     JSON.stringify({ generatedAt: "2026-10-12T00:00:00Z", notes: notes.map((n) => ({ deadlines: [], ...n })) }),
   );
 }
-/** GitHub 의 답: 워크플로가 있는 레포와 공개 레포를 정한다. 레포별 커밋·PR 조회에는 답이 없다. */
-function github({ ready = [] as string[], open = [] as string[] } = {}) {
+/**
+ * GitHub 의 답: 워크플로가 있는 레포, 공개 레포, 열린 이슈 목록(null 이면 그 조회가 실패한다)을 정한다.
+ * 레포별 커밋·PR 조회에는 답이 없다.
+ */
+function github({ ready = [] as string[], open = [] as string[], issues = [] as object[] | null } = {}) {
   mocks.ghJson.mockImplementation(async (path: string) => {
     if (path.startsWith("/search")) return { total_count: 0, items: [] };
     if (path.endsWith(WORKFLOW)) {
       return ready.includes(path.slice("/repos/".length, -WORKFLOW.length)) ? { type: "file", name: "claude.yml" } : null;
     }
+    if (path.endsWith(OPEN_ISSUES)) return issues;
     if (/^\/repos\/[^/]+\/[^/?]+$/.test(path)) return { private: !open.includes(path.slice("/repos/".length)) };
     return null;
   });
@@ -495,6 +500,81 @@ describe("delegate button", () => {
     expect(late.interaction.deferUpdate).not.toHaveBeenCalled();
     expect(mocks.ghPost).toHaveBeenCalledTimes(1);
     expect(saved()[id.split(":")[2]!]).toMatchObject({ text: "결제 실패 재시도 추가", issueUrl: ISSUE });
+  });
+
+  it("reuses an open issue that already has the title, as after a POST that timed out but went through", async () => {
+    const long = "긴 할 일 ".repeat(40).trim();
+    seedVault([{ note: "위젯 가게", slug: "widgets", tasks: [{ text: long, due: "2026-10-13" }, { text: "관리자 화면 정렬 버그" }] }]);
+    github({ ready: ["acme/widgets"] });
+    const { digest, rows, handleButton } = await aDigest();
+    const [first, second] = rows[2]!;
+
+    // 이슈는 올라갔는데 응답을 받지 못했다(시간 초과). 봇은 실패로 알린다.
+    mocks.ghPost.mockResolvedValueOnce(null);
+    const lost = click(first!.id, digest);
+    await lost.press(handleButton);
+    expect(lost.interaction.followUp).toHaveBeenCalledWith({
+      content: expect.stringContaining("이슈를 올리지 못했습니다"), flags: EPHEMERAL,
+    });
+
+    // 다시 누르면 또 올리지 않고 그 이슈를 올린 것으로 적는다. 제목(120자로 자른 것)이 같아야 하고, PR 은 이슈가 아니다.
+    github({
+      ready: ["acme/widgets"],
+      issues: [
+        { title: `${long.slice(0, 119)}…`, html_url: "https://github.com/acme/widgets/pull/9", pull_request: {} },
+        { title: long, html_url: "https://github.com/acme/widgets/issues/5" },
+        { title: `${long.slice(0, 119)}…`, html_url: ISSUE },
+      ],
+    });
+    const again = click(first!.id, digest);
+    await again.press(handleButton);
+    expect(asked(OPEN_ISSUES)).toEqual([`/repos/acme/widgets${OPEN_ISSUES}`, `/repos/acme/widgets${OPEN_ISSUES}`]);
+    expect(mocks.ghPost).toHaveBeenCalledTimes(1);
+    expect(saved()[first!.id.split(":")[2]!]?.issueUrl).toBe(ISSUE);
+    expect(delegated(digest.message.embeds[0]!)).toEqual([`🤖 위임함: ${ISSUE}`]);
+    expect(buttons(digest.message.components)[2]).toEqual([second]);
+    expect(again.interaction.followUp).not.toHaveBeenCalled();
+
+    // 제목이 같은 것이 PR 뿐이면 평소대로 올린다.
+    github({
+      ready: ["acme/widgets"],
+      issues: [
+        { title: "관리자 화면 정렬 버그", html_url: "https://github.com/acme/widgets/pull/10", pull_request: {} },
+        { title: "관리자 화면 정렬 버그 2차", html_url: "https://github.com/acme/widgets/issues/11" },
+      ],
+    });
+    mocks.ghPost.mockResolvedValueOnce({ html_url: "https://github.com/acme/widgets/issues/12" });
+    await click(second!.id, digest).press(handleButton);
+    expect(mocks.ghPost).toHaveBeenCalledTimes(2);
+    expect(mocks.ghPost).toHaveBeenLastCalledWith("/repos/acme/widgets/issues", {
+      title: "관리자 화면 정렬 버그", body: BODY("관리자 화면 정렬 버그", "위젯 가게"),
+    });
+    expect(delegated(digest.message.embeds[0]!)).toEqual([
+      `🤖 위임함: ${ISSUE}\n🤖 위임함: https://github.com/acme/widgets/issues/12`,
+    ]);
+  });
+
+  it("files nothing when it cannot list the repo's open issues", async () => {
+    github({ ready: ["acme/widgets"], issues: null }); // 한도 초과·5xx·시간 초과: ghJson 은 null 을 준다
+    const { digest, rows, handleButton } = await aDigest();
+    const before = snapshot(digest);
+    const id = rows[2]![0]!.id;
+
+    const tap = click(id, digest);
+    await tap.press(handleButton);
+    expect(asked(OPEN_ISSUES)).toEqual([`/repos/acme/widgets${OPEN_ISSUES}`]);
+    expect(mocks.ghPost).not.toHaveBeenCalled(); // 이미 올라가 있는지 모르는 채로 올리지 않는다
+    expect(tap.interaction.followUp).toHaveBeenCalledWith({
+      content: expect.stringContaining("열린 이슈를 확인하지 못해 올리지 않았습니다"), flags: EPHEMERAL,
+    });
+    expect(snapshot(digest)).toEqual(before);
+    expect(saved()[id.split(":")[2]!]?.issueUrl).toBeUndefined();
+
+    // 목록이 다시 읽히고 같은 제목이 없으면 올린다.
+    github({ ready: ["acme/widgets"] });
+    await click(id, digest).press(handleButton);
+    expect(mocks.ghPost).toHaveBeenCalledTimes(1);
+    expect(delegated(digest.message.embeds[0]!)).toEqual([`🤖 위임함: ${ISSUE}`]);
   });
 
   it("tells the issue link privately when the digest message can no longer be edited", async () => {

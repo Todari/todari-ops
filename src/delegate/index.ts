@@ -247,13 +247,28 @@ export async function handleDelegateButton(interaction: ButtonInteraction): Prom
         return;
       }
     }
-    const issue = await ghPost<{ html_url?: string }>(`/repos/${task.fullName}/issues`, {
-      title: clip(task.text, MAX_TITLE),
-      body: issueBody(task),
-    });
+    const title = clip(task.text, MAX_TITLE);
+    // 시간 초과로 실패한 POST 는 실제로는 올라갔을 수 있다. 같은 제목의 열린 이슈가 이미 있으면 그것을 올린 이슈로 보고
+    // 또 올리지 않는다(이 목록에는 PR 도 섞여 온다). 목록을 받지 못하면 중복인지 알 수 없으니 올리지 않는다.
+    // ponytail: 가장 최근에 열린 50개만 본다. 열린 이슈·PR 이 그보다 많이 쌓이는 레포라면 제목 검색으로 바꾼다.
+    const open = await ghJson<Array<{ title?: string; html_url?: string; pull_request?: unknown }>>(
+      `/repos/${task.fullName}/issues?state=open&per_page=50`,
+    );
+    if (!Array.isArray(open)) {
+      await interaction.followUp(
+        ephemeral(
+          `⚠️ **${task.fullName}** 의 열린 이슈를 확인하지 못해 올리지 않았습니다. GitHub 응답과 \`GITHUB_TOKEN\` 의 Issues 권한을 확인해주세요.`,
+        ),
+      );
+      return;
+    }
+    const issue =
+      open.find((found) => !found.pull_request && found.title === title) ??
+      (await ghPost<{ html_url?: string }>(`/repos/${task.fullName}/issues`, {
+        title,
+        body: issueBody(task),
+      }));
     if (!issue?.html_url) {
-      // ponytail: 시간 초과로 실패한 POST 는 실제로는 올라갔을 수 있고, 그때 다시 누르면 같은 이슈가 하나 더 생긴다.
-      // 문제가 되면 올리기 전에 같은 제목의 열린 이슈를 찾는다.
       await interaction.followUp(
         ephemeral(
           `⚠️ **${task.fullName}** 에 이슈를 올리지 못했습니다. GitHub 응답과 \`GITHUB_TOKEN\` 의 Issues 쓰기 권한을 확인해주세요.`,
