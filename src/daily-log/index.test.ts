@@ -23,15 +23,19 @@ import { groupCommits, groupNotes, kstDayWindow, renderDailyLog, summarize, type
 
 const kst = (hhmm: string, date = "2026-10-12") => Date.parse(`${date}T${hhmm}:00+09:00`);
 const DAY = kstDayWindow("2026-10-11");
-const commit = (repo: string, message: string, at: string) => ({
+/** 검색 결과의 커밋 하나. author 는 작성자에 연결된 GitHub 계정이다(연결된 계정이 없으면 null). */
+const commit = (repo: string, message: string, at: string, login: string | null = "octo-owner") => ({
   repository: { full_name: repo },
+  author: login ? { login } : null,
   commit: { message, committer: { date: `2026-10-${at}:00.000+09:00` } },
 });
+/** 검색은 됐고 커밋이 없었다. 검색이 실패하면 ghJson 은 이것이 아니라 null 을 준다. */
+const NO_COMMITS = { total_count: 0, items: [] };
 const evidence = (over: Partial<DayEvidence> = {}): DayEvidence => ({
   commits: [], commitsBeyondPage: 0, events: [], notes: [], ...over,
 });
-/** GitHub 의 답: 커밋 검색 결과와 토큰의 주인(GET /user, null 이면 알아내지 못한다). */
-function github(search: unknown = null, login: string | null = "octo-owner") {
+/** GitHub 의 답: 커밋 검색 결과(null 이면 검색 실패)와 토큰의 주인(GET /user, null 이면 알아내지 못한다). */
+function github(search: unknown = NO_COMMITS, login: string | null = "octo-owner") {
   mocks.ghJson.mockImplementation(async (path: string) => (path === "/user" ? login && { login } : search));
 }
 /** 봇이 GitHub 에 물은 것들, 순서대로. */
@@ -373,7 +377,7 @@ describe("nightly scheduler", () => {
   });
 
   it("falls back to the owners' repositories while the login is unknown, and asks again the next time", async () => {
-    github(null, null); // GET /user 가 실패한다
+    github(NO_COMMITS, null); // GET /user 가 실패한다
     const log = await boot(kst("09:00"));
     await log.writeDailyLog("2026-10-11");
     mocks.env.DAILY_LOG_OWNERS = ["my-org"];
@@ -388,6 +392,57 @@ describe("nightly scheduler", () => {
       "/user",
       expect.stringContaining("q=author:octo-owner user:my-org -repo:Todari/obsidian-vault committer-date:"),
     ]);
+  });
+
+  it("keeps only the author's own commits when GitHub ignores the author qualifier", async () => {
+    // 없는 로그인의 author: 조건을 GitHub 은 말없이 버리고 남의 커밋을 돌려준다(200).
+    mocks.env.DAILY_LOG_AUTHOR = "octo-ownr";
+    github({
+      total_count: 48_211_907,
+      items: [commit("someone/else", "feat: not mine", "11T21:00", "someone"), commit("another/repo", "fix: nor this", "11T09:00", null)],
+    });
+    const log = await boot(kst("09:00"));
+    expect(await log.writeDailyLog("2026-10-11")).toBe(false); // 남의 커밋도, 그 수("외 48,211,905건")도 적지 않는다
+    expect(mocks.write).not.toHaveBeenCalled();
+
+    // 제대로 적은 로그인은 대소문자가 달라도 자기 커밋이고, 한 쪽에 다 담기지 않은 수도 그대로 센다.
+    mocks.env.DAILY_LOG_AUTHOR = "Octo-Owner";
+    github({
+      total_count: 5,
+      items: [commit("Todari/todari-ops", "fix: b", "11T21:00"), commit("Todari/todari-ops", "feat: a", "11T09:00")],
+    });
+    await log.writeDailyLog("2026-10-11");
+    expect(mocks.write.mock.calls).toEqual([[
+      "2026-10-11", "### 코드\n- **todari-ops** 2건: feat: a; fix: b\n- 외 3건 (GitHub 검색 한 번에 담기는 100건 밖)",
+    ]]);
+  });
+
+  it("leaves a day unwritten and pending when its commit search fails, and writes it on the next run", async () => {
+    mocks.firstTask.mockImplementation((date: string) => `${date} 에 정한 일`); // 다른 근거는 날마다 있다
+    // 2026-10-10 하루의 검색만 실패한다(한도 초과·5xx·시간 초과: ghJson 은 null 을 준다).
+    mocks.ghJson.mockImplementation(async (path: string) => {
+      if (path === "/user") return { login: "octo-owner" };
+      return decodeURIComponent(path).includes("committer-date:2026-10-09T15:00:00Z") ? null : NO_COMMITS;
+    });
+    seed("daily-log.json", { processed: "2026-10-08" });
+    seed("scheduled-posts.json", { "daily-log": "2026-10-09" });
+    const log = await boot(kst("10:00"));
+    // 커밋을 모르는 날을 "커밋 없음"으로 써 버리지 않는다. 뒤의 날은 그대로 쓴다.
+    expect(written()).toEqual(["2026-10-09", "2026-10-11"]);
+    expect(mocks.captureException.mock.calls).toEqual([
+      [expect.objectContaining({ message: "commit search failed for 2026-10-10" }), { kind: "daily-log", date: "2026-10-10" }],
+    ]);
+    expect(saved("daily-log.json")).toMatchObject({ date: "2026-10-11", processed: "2026-10-11", pending: ["2026-10-10"] });
+    expect(log.yesterdayLogSummary()).toBe("기록됨 → 볼트 데일리/2026-10-11.md");
+
+    mocks.write.mockClear();
+    github({ total_count: 1, items: [commit("Todari/todari-ops", "feat: a", "10T09:00")] }); // 다음 날 밤에는 검색이 된다
+    await vi.advanceTimersByTimeAsync(kst("00:40", "2026-10-13") - kst("10:00"));
+    expect(mocks.write.mock.calls).toEqual([
+      ["2026-10-10", "### 코드\n- **todari-ops** 1건: feat: a\n### 내일 첫 작업\n- 2026-10-10 에 정한 일"],
+      ["2026-10-12", "### 내일 첫 작업\n- 2026-10-12 에 정한 일"],
+    ]);
+    expect(saved("daily-log.json")).toMatchObject({ date: "2026-10-12", processed: "2026-10-12", pending: [] });
   });
 
   it("reports a failed vault write, records no summary and still arms the next night", async () => {

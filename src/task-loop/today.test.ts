@@ -145,7 +145,8 @@ beforeEach(() => {
   for (const method of ["log", "warn"] as const) vi.spyOn(console, method).mockImplementation(() => {});
   root = mkdtempSync(join(tmpdir(), "today-picks-"));
   mocks.env.WORK_DIR = join(root, "work");
-  mocks.ghJson.mockResolvedValue(null);
+  // 레포별 조회에는 답이 없고, 커밋 검색은 "커밋 없음"으로 답한다(null 은 검색 실패다).
+  mocks.ghJson.mockImplementation(async (path: string) => (path.startsWith("/search") ? { total_count: 0, items: [] } : null));
   mocks.added.mockResolvedValue([]);
   mocks.complete.mockResolvedValue({ changed: true });
   mocks.write.mockResolvedValue({ changed: true, commit: "abc1234" });
@@ -274,7 +275,8 @@ describe("morning digest", () => {
   it("moves the projects with commits in the last three days ahead of the other notes", async () => {
     seedVault(VAULT);
     const pushed = (repo: string, at: string) => ({
-      repository: { full_name: repo }, commit: { message: "feat: work", committer: { date: `2026-10-${at}:00+09:00` } },
+      repository: { full_name: repo }, author: { login: "octo-owner" },
+      commit: { message: "feat: work", committer: { date: `2026-10-${at}:00+09:00` } },
     });
     mocks.ghJson.mockImplementation(async (path: string) => {
       if (path === "/user") return { login: "octo-owner" };

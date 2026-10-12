@@ -219,6 +219,21 @@ it("posts the plain prompt when there is no evidence and no vault snapshot", asy
   });
 });
 
+it("shows the rest of today's evidence when the commit search fails", async () => {
+  mocks.ghJson.mockResolvedValue(null); // 한도 초과·5xx·시간 초과: ghJson 은 null 을 준다
+  mocks.added.mockResolvedValue(["이정표/의사결정/2026-10-12 가격 정책.md"]);
+  writeFileSync(join(root, "events.json"), JSON.stringify([{ t: kst("16:00"), kind: "vercel_deploy", project: "todari" }]));
+  seedVault([{ note: "todari-ops", tasks: [{ text: "배포 확인" }] }]);
+  const { postCheckinPrompt } = await boot(kst("21:30"));
+  expect(await postCheckinPrompt()).toBe(true);
+  // 밤의 자동 기록과 달리 커밋만 빼고 그대로 보여 준다.
+  expect(posted().embeds).toEqual([expect.objectContaining({
+    title: "오늘 한 일 (지금까지)",
+    fields: [{ name: "운영", value: "- 배포 1건 (todari)" }, { name: "볼트", value: "- 의사결정: 2026-10-12 가격 정책" }],
+  })]);
+  expect(posted().buttons.map((button) => button.label)).toEqual(["📝 회고 쓰기 (30초)", "🎯 todari-ops · 배포 확인"]);
+});
+
 it("does not hold the prompt back when evidence collection hangs", async () => {
   mocks.ghJson.mockReturnValue(new Promise(() => {})); // GitHub 이 끝내 답하지 않는다
   seedVault([{ note: "todari-ops", tasks: [{ text: "배포 확인" }] }]);

@@ -26,6 +26,8 @@ export interface DayEvidence {
   commits: RepoCommits[];
   /** 검색 한 번(100건)에 담기지 않아 레포별로 나누지 못한 커밋 수. */
   commitsBeyondPage: number;
+  /** 커밋 검색이 실패해 그날의 커밋을 알 수 없다. commits 가 비어 있어도 "커밋이 없던 날"이 아니다. */
+  commitsUnknown?: boolean;
   events: EventRecord[];
   /** 그날 볼트에 새로 생긴 노트 경로. */
   notes: string[];
@@ -43,6 +45,8 @@ export interface Section {
 
 interface CommitSearchItem {
   repository?: { full_name?: string };
+  /** 커밋 작성자에 연결된 GitHub 계정. 연결된 계정이 없으면 null. */
+  author?: { login?: string } | null;
   commit?: { message?: string; committer?: { date?: string } };
 }
 
@@ -109,7 +113,7 @@ export function within<T>(ms: number, work: Promise<T>): Promise<T | null> {
 export async function collectActivity(date: string): Promise<DayEvidence> {
   const window = kstDayWindow(date);
   const [found, notes] = await Promise.all([
-    optional("commits", { commits: [], commitsBeyondPage: 0 }, () => searchCommits(window)),
+    optional("commits", { commits: [], commitsBeyondPage: 0, commitsUnknown: true }, () => searchCommits(window)),
     optional("vault notes", [], () => listVaultNotesAdded(window.start, window.end)),
   ]);
   const events = await optional("events", [], () =>
@@ -142,7 +146,7 @@ async function authorLogin(): Promise<string | undefined> {
 
 async function searchCommits(
   window: DayWindow,
-): Promise<Pick<DayEvidence, "commits" | "commitsBeyondPage">> {
+): Promise<Pick<DayEvidence, "commits" | "commitsBeyondPage" | "commitsUnknown">> {
   // 작성자로 찾는다. 소유자(user:)로 찾으면 조직 레포에 올라온 다른 사람·봇의 커밋까지 "한 일"로 적힌다.
   const author = await authorLogin();
   let owners = env.DAILY_LOG_OWNERS;
@@ -163,10 +167,17 @@ async function searchCommits(
   const found = await ghJson<{ total_count?: number; items?: CommitSearchItem[] }>(
     `/search/commits?q=${encodeURIComponent(q)}&sort=committer-date&order=desc&per_page=100`,
   );
-  const items = found?.items ?? [];
+  // ghJson 은 실패(한도 초과·5xx·시간 초과)해도 던지지 않고 null 을 준다. "커밋이 없었다"와 섞이지 않게 알린다.
+  if (!found) return { commits: [], commitsBeyondPage: 0, commitsUnknown: true };
+  const items = found.items ?? [];
+  // GitHub 은 없는 로그인의 author: 조건을 말없이 버리고 남의 커밋을 돌려준다(200). 그 로그인이 쓴 것만 남긴다.
+  const mine = author
+    ? items.filter((item) => item.author?.login?.toLowerCase() === author.toLowerCase())
+    : items;
   return {
-    commits: groupCommits(items, window, vaultRepo),
-    commitsBeyondPage: Math.max(0, (found?.total_count ?? 0) - items.length),
+    commits: groupCommits(mine, window, vaultRepo),
+    // 걸러진 것이 있으면 조건이 먹히지 않은 검색이다. 그때의 total_count 는 그 사람의 커밋 수가 아니다.
+    commitsBeyondPage: mine.length < items.length ? 0 : Math.max(0, (found.total_count ?? 0) - items.length),
   };
 }
 

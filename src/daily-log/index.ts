@@ -98,11 +98,18 @@ async function writePendingDays(): Promise<void> {
   }
 }
 
-/** date(KST) 하루의 기록을 볼트에 쓴다. 근거가 하나도 없으면 아무것도 쓰지 않고 false. */
+/**
+ * date(KST) 하루의 기록을 볼트에 쓴다. 근거가 하나도 없으면 아무것도 쓰지 않고 false.
+ * 커밋 검색이 실패했으면 쓰지 않고 던진다.
+ */
 export async function writeDailyLog(date: string): Promise<boolean> {
   const window = kstDayWindow(date);
+  const activity = await collectActivity(date);
+  // 커밋을 알아내지 못한 채 쓰면 그날은 "커밋 없음"으로 남고, 살펴본 날이 되어 다시 쓰지 않는다.
+  // 쓰지 않고 실패로 돌려 다음 실행이 다시 쓰게 한다. (저녁 체크인은 같은 수집 결과에서 커밋만 빼고 보여 준다.)
+  if (activity.commitsUnknown) throw new Error(`commit search failed for ${date}`);
   const evidence: DayEvidence = {
-    ...(await collectActivity(date)),
+    ...activity,
     instagram: await optional("instagram brief", undefined, () => instagramBriefFor(window)),
     jp: await optional("jp", undefined, () => jpLine(window)),
     picks: await optional("today picks", undefined, () => getTodayPicks(date)),
