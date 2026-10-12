@@ -245,7 +245,10 @@ async function editVaultTaskNow(
   const dir = await prepareVault();
   try {
     const relative = taskNotePath(ref.projectSlug, ref.note);
-    const file = await resolveExistingPath(dir, relative);
+    // 스냅샷에는 있지만 봇 사본에서 경로를 찾지 못하는 노트(프로젝트/ 밖의 허브 등)는 줄이 없는 것과 같게 다룬다.
+    // 예외로 두면 버튼을 누를 때마다 사본을 버리고 다시 받는다.
+    const file = await resolveExistingPath(dir, relative).catch(() => null);
+    if (!file) return { changed: false, path: relative, summary: "노트 파일을 찾지 못했습니다." };
     const previous = await readFile(file, "utf8");
     const edit =
       action === "complete"
