@@ -42,7 +42,7 @@ vi.mock("../jp/cards.js", () => ({ dueCards: vi.fn(), gradeCard: vi.fn(), dailyC
 // 볼트 스냅샷·고른 할 일(today-picks.json)·보류(task-tidy.json)·체크인·다이제스트는 실제 구현이 임시 /data 를 읽고 쓴다.
 
 type Note = { note: string; slug?: string; tasks: Array<{ text: string; due?: string }> };
-type Option = { label: string; description?: string; value: string };
+type Option = { label: string; description?: string; value: string; default?: boolean };
 type Sent = { embeds: EmbedBuilder[]; components: Array<ActionRowBuilder<ButtonBuilder>> };
 const kst = (hhmm: string, date = "2026-10-12") => Date.parse(`${date}T${hhmm}:00+09:00`); // 2026-10-12 는 월요일
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
@@ -176,6 +176,24 @@ describe("pickCandidates", () => {
     expect(candidates.every((c) => /^[0-9a-f]{8}$/.test(c.id))).toBe(true);
   });
 
+  it("leads with last night's first task, then deadlines, then the projects worked on lately", async () => {
+    const { pickCandidates } = await boot(kst("08:30"));
+    const vault = { generatedAt: "", notes: VAULT.map((n) => ({ deadlines: [], ...n })) };
+    const order = { first: { note: "todari-ops", text: "셋째 할 일" }, active: ["인스타 실험실", "hgt", "볼트에-없는-프로젝트"] };
+    expect(pickCandidates(vault, order).map(({ note, text, due }) => `${note} · ${text}${due ? ` @${due}` : ""}`)).toEqual([
+      "todari-ops · 셋째 할 일", // 어젯밤 정한 "내일 첫 작업"
+      "이정표 · 관납료 납부 @2026-10-05",
+      "todari-ops · 주간 요약 다듬기 @2026-10-14",
+      "이정표 · 사업계획서 제출 @2026-10-19",
+      `인스타 실험실 · ${LONG}`, // 최근 커밋한 프로젝트의 첫 할 일, 커밋이 많은 순
+      "HGT · 배포 키 구성",
+      "todari-ops · 알림 버튼 실사용 확인", // 나머지 노트의 첫 할 일
+      "HGT · 스토어 심사 제출 @2026-10-30", // 둘째 할 일부터도 같은 노트 순서다
+    ]);
+    // 그 할 일이 밤사이 끝났거나 문장이 바뀌었으면 맨 앞 자리는 없다.
+    expect(pickCandidates(vault, { first: { note: "todari-ops", text: "어제 끝낸 일" } })[0]?.text).toBe("관납료 납부");
+  });
+
   it("stops at 25, the select menu limit", async () => {
     const { pickCandidates } = await boot(kst("08:30"));
     const notes = Array.from({ length: 12 }, (_, i) => ({
@@ -218,6 +236,87 @@ describe("morning digest", () => {
       "▶ jeongpyo: 관납료 납부", "▶ todari-ops: 주간 요약 다듬기", "▶ jeongpyo: 사업계획서 제출",
     ]);
     expect(buttons(digest.components.slice(1))[0]?.every((button) => button.id.startsWith("triage:start:"))).toBe(true);
+  });
+
+  it("puts last night's first task on top of the menu, already selected, while it is still open", async () => {
+    seedVault(VAULT);
+    const evening = await boot(kst("21:30", "2026-10-11"));
+    await evening.postCheckinPrompt();
+    const prompt = received(lastSent());
+    const candidate = buttons(prompt.message.components)[2]![0]!;
+    expect(candidate.label).toBe("🎯 todari-ops · 주간 요약 다듬기 (📅 10-14)");
+    await click(candidate.id, prompt).press(evening.handleButton);
+
+    const morning = await boot(kst("08:30"));
+    await morning.postDigest();
+    // 다이제스트 맨 위의 칸은 저녁에 본 문장 그대로다.
+    expect(fields(lastSent().embeds[0]!)[0]).toMatchObject({
+      name: "🎯 오늘 첫 작업 (어제 체크인)", value: "todari-ops · 주간 요약 다듬기 (📅 10-14)",
+    });
+    const selected = (options: Option[]) => options.map((option) => `${option.default ? "☑ " : ""}${option.label}`);
+    expect(selected(menu(lastSent()).options).slice(0, 4)).toEqual([
+      "☑ 주간 요약 다듬기", "관납료 납부", "사업계획서 제출", "배포 키 구성",
+    ]);
+    expect(menu(lastSent()).options).toHaveLength(8); // 맨 앞에 온 할 일이 제자리에 또 나오지 않는다
+
+    // 밤사이 그 할 일을 끝냈으면(스냅샷에서 빠짐) 미리 고르지 않는다. 모달에 직접 쓴 첫 작업도 견줄 할 일이 없다.
+    seedVault(VAULT.map((n) => ({ ...n, tasks: n.tasks.filter((task) => task.text !== "주간 요약 다듬기") })));
+    await (await boot(kst("08:40"))).postDigest();
+    expect(selected(menu(lastSent()).options)[0]).toBe("관납료 납부");
+    seedVault(VAULT);
+    const typed = await boot(kst("08:50"));
+    await typed.saveTomorrowFirstTask("2026-10-11", "주간 요약 다듬기");
+    await typed.postDigest();
+    expect(selected(menu(lastSent()).options).slice(0, 2)).toEqual(["관납료 납부", "주간 요약 다듬기"]);
+  });
+
+  it("moves the projects with commits in the last three days ahead of the other notes", async () => {
+    seedVault(VAULT);
+    const pushed = (repo: string, at: string) => ({
+      repository: { full_name: repo }, commit: { message: "feat: work", committer: { date: `2026-10-${at}:00+09:00` } },
+    });
+    mocks.ghJson.mockImplementation(async (path: string) => {
+      if (path === "/user") return { login: "octo-owner" };
+      if (!path.startsWith("/search/commits")) return null; // 레포별 커밋·PR 조회
+      return {
+        total_count: 4,
+        items: [
+          pushed("Todari/todari-ops", "12T08:00"), pushed("Todari/jeongpyo", "11T20:00"),
+          pushed("Todari/todari-ops", "10T10:00"), pushed("Todari/todari-ops", "09T08:00"), // 사흘보다 앞선 커밋은 세지 않는다
+        ],
+      };
+    });
+    const { postDigest } = await boot(kst("08:30"));
+    await postDigest();
+
+    const search = mocks.ghJson.mock.calls.map(([path]) => decodeURIComponent(String(path))).find((path) => path.startsWith("/search"));
+    expect(search).toContain("q=author:octo-owner committer-date:2026-10-08T23:30:00Z..2026-10-11T23:30:00Z&");
+    expect(menu(lastSent()).options.map((option) => option.label).slice(3, 6)).toEqual([
+      "알림 버튼 실사용 확인", // todari-ops: 사흘 동안 커밋이 가장 많다 (이정표의 첫 할 일은 이미 마감 순에 있다)
+      "배포 키 구성",
+      LONG.slice(0, 99) + "…",
+    ]);
+  });
+
+  it("posts on time without that order when the commit lookup hangs or fails", async () => {
+    seedVault(VAULT);
+    // 커밋 검색만 끝내 답하지 않는다.
+    mocks.ghJson.mockImplementation((path: string) => (path.startsWith("/search") ? new Promise(() => {}) : Promise.resolve(null)));
+    const slow = await boot(kst("08:30"));
+    const posting = slow.postDigest();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(mocks.send).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await posting).toBe(true);
+    const plain = menu(lastSent()).options.map((option) => option.label);
+    expect(plain.slice(3, 5)).toEqual(["배포 키 구성", "알림 버튼 실사용 확인"]);
+
+    // 조회가 던져도(레포별 조회는 그대로 답한다) 메뉴만 그 순서 없이 나간다.
+    mocks.ghJson.mockImplementation((path: string) =>
+      path.startsWith("/repos") ? Promise.resolve(null) : Promise.reject(new Error("github down")),
+    );
+    await (await boot(kst("08:40"))).postDigest();
+    expect(menu(lastSent()).options.map((option) => option.label)).toEqual(plain);
   });
 
   it("has no menu without a vault snapshot and caps the picks at the number of candidates", async () => {

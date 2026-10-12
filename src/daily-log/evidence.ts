@@ -4,7 +4,7 @@
 
 import { env } from "../env.js";
 import { ghJson } from "../github/api.js";
-import { projects, repoFullName } from "../projects.js";
+import { findProjectByRepoFullName, projects, repoFullName } from "../projects.js";
 import { eventsSince, type EventKind, type EventRecord } from "../stats/events.js";
 import { listVaultNotesAdded } from "../vault/mutations.js";
 import { VAULT_PROJECT } from "../vault/repo.js";
@@ -96,6 +96,15 @@ export async function optional<T>(
   }
 }
 
+/** ms 안에 끝나지 않으면 null. 근거 수집이 늦어도 예약 게시는 제때 나가야 한다. */
+export function within<T>(ms: number, work: Promise<T>): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** 커밋·운영 이벤트·새 볼트 노트 — 어느 날짜에나 다시 모을 수 있는 근거. */
 export async function collectActivity(date: string): Promise<DayEvidence> {
   const window = kstDayWindow(date);
@@ -107,6 +116,17 @@ export async function collectActivity(date: string): Promise<DayEvidence> {
     eventsSince(Date.now() - window.start).filter((event) => event.t < window.end),
   );
   return { ...found, events, notes };
+}
+
+/** 커밋한 레포를 볼트 노트와 견줄 이름으로: 카탈로그 프로젝트면 그 slug, 아니면 레포 이름. 커밋이 많은 순 그대로다. */
+export function activeProjects(commits: RepoCommits[]): string[] {
+  return commits.map((repo) => findProjectByRepoFullName(repo.fullName)?.slug ?? repo.repo);
+}
+
+/** 지난 days 일 동안 커밋한 프로젝트, 커밋이 많은 순. 아침의 고르기 메뉴가 최근 손댄 프로젝트를 앞세우는 데 쓴다. */
+export async function recentlyActiveProjects(days: number): Promise<string[]> {
+  const end = Date.now();
+  return activeProjects((await searchCommits({ start: end - days * DAY_MS, end })).commits);
 }
 
 // GITHUB_TOKEN 주인의 로그인. 봇이 떠 있는 동안 바뀌지 않으므로 알아낸 뒤에는 다시 묻지 않는다.

@@ -135,7 +135,7 @@ it("saves the tapped candidate in full and swaps the candidate buttons for one l
   expect(picked.label).not.toBe(`🎯 ${full}`); // 라벨은 잘렸다
 
   // 저녁 배포로 봇이 재시작한 뒤에, 자정을 넘겨 눌러도 그 저녁의 체크인이다.
-  const { handleButton, getFirstTaskChosenOn, getTodayFirstTask } = await boot(kst("00:30", "2026-10-13"));
+  const { handleButton, getFirstTaskChosenOn, getTodayFirstTask, getTodayFirstTaskRef } = await boot(kst("00:30", "2026-10-13"));
   const { interaction, press } = click(picked.id);
   await press(handleButton);
 
@@ -147,6 +147,10 @@ it("saves the tapped candidate in full and swaps the candidate buttons for one l
   expect(getFirstTaskChosenOn("2026-10-13")).toBeNull();
   vi.setSystemTime(kst("08:30", "2026-10-13"));
   expect(getTodayFirstTask()).toBe(full); // 아침 다이제스트 맨 위
+  // 어느 할 일인지도 남는다: 아침의 고르기 메뉴가 그 할 일을 맨 앞에 미리 골라 둔다.
+  expect(getTodayFirstTaskRef()).toEqual({ note: "linkive-geo", text: LONG_TASK });
+  vi.setSystemTime(kst("08:30", "2026-10-14")); // 하루가 더 지나면 지난 선택이다
+  expect(getTodayFirstTaskRef()).toBeNull();
 });
 
 it("answers an expired, unknown or foreign pick privately without saving anything", async () => {
@@ -190,8 +194,8 @@ it("keeps an earlier prompt's buttons alive after a second /checkin and forgets 
   const stored = JSON.parse(readFileSync(join(root, "checkin-candidates.json"), "utf8")) as Record<string, object>;
   expect(Object.keys(stored)).toEqual(["2026-10-05", "2026-10-12"]);
   expect(stored["2026-10-12"]).toEqual({
-    [first.id.split(":")[3]!]: { label: "todari-ops · 배포 확인", at: kst("21:30") },
-    [second.id.split(":")[3]!]: { label: "todari-ops · 배포 확인", at: kst("21:30") },
+    [first.id.split(":")[3]!]: { label: "todari-ops · 배포 확인", note: "todari-ops", text: "배포 확인", at: kst("21:30") },
+    [second.id.split(":")[3]!]: { label: "todari-ops · 배포 확인", note: "todari-ops", text: "배포 확인", at: kst("21:30") },
   });
 
   await click(first.id).press(handleButton);
@@ -240,7 +244,8 @@ it("orders candidates by due date, then today's projects, then the remaining not
       { note: "인스타 실험실", deadlines: [], tasks: [{ text: "바" }] }, // 카탈로그 밖 노트도 후보다
     ],
   };
-  expect(firstTaskCandidates(vault, ["인스타 실험실", "hgt"], 10)).toEqual([
+  const labels = (active: string[], limit?: number) => firstTaskCandidates(vault, active, limit).map((c) => c.label);
+  expect(labels(["인스타 실험실", "hgt"], 10)).toEqual([
     "포크레터 · 라 (📅 10-20)",
     "섹터4 · 다 (📅 11-01)",
     "인스타 실험실 · 바",
@@ -248,5 +253,7 @@ it("orders candidates by due date, then today's projects, then the remaining not
     "섹터4 · 나",
     // "포크레터 · 라"는 이미 마감 순에 있다
   ]);
-  expect(firstTaskCandidates(vault, [])).toEqual(["포크레터 · 라 (📅 10-20)", "섹터4 · 다 (📅 11-01)", "HGT · 가"]);
+  expect(labels([])).toEqual(["포크레터 · 라 (📅 10-20)", "섹터4 · 다 (📅 11-01)", "HGT · 가"]);
+  // 버튼에 보이는 문장과 별개로 어느 노트의 어느 할 일인지 함께 돌려준다.
+  expect(firstTaskCandidates(vault, [])[0]).toEqual({ label: "포크레터 · 라 (📅 10-20)", note: "포크레터", text: "라" });
 });

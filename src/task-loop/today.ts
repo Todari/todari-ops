@@ -31,6 +31,14 @@ export interface TodayTask extends VaultTaskRef {
   done?: boolean;
 }
 
+/** 고르기 메뉴의 후보 순서를 정하는 근거. 없으면 그 단계는 건너뛴다. */
+export interface PickOrder {
+  /** 어젯밤 체크인의 후보 버튼으로 정한 "내일 첫 작업". 아직 열려 있으면 맨 앞에 미리 골라 둔다. */
+  first?: Pick<VaultTaskRef, "note" | "text"> | null;
+  /** 최근 커밋한 프로젝트(카탈로그 slug 또는 레포 이름), 커밋이 많은 순. */
+  active?: string[];
+}
+
 interface Day {
   /** 그날 메뉴에 실은 후보. 재시작 뒤에도 고른 값(id)을 할 일로 되돌린다. */
   candidates: TodayTask[];
@@ -59,15 +67,29 @@ export function getTodayPicks(date: string): TodayTask[] {
   return readJsonObject<Day>(FILE)[date]?.picks ?? [];
 }
 
+const taskId = (note: string, text: string) =>
+  createHash("sha1").update(`${note}\n${text}`).digest("hex").slice(0, 8);
+
+/** active 에 든 프로젝트의 노트를 그 순서대로 앞에 세운다. 나머지 노트는 볼트 순서 그대로 뒤에 온다. */
+export function activeFirst<N extends { note: string; slug?: string }>(notes: N[], active: string[]): N[] {
+  const slugs = active.map((slug) => slug.toLowerCase());
+  const rank = (n: N) => {
+    const index = slugs.indexOf((n.slug ?? n.note).toLowerCase());
+    return index < 0 ? slugs.length : index;
+  };
+  return [...notes].sort((a, b) => rank(a) - rank(b));
+}
+
 /**
- * 고르기 메뉴의 후보: 마감이 지났거나 7일 안인 할 일(마감 순) → 노트마다 첫 할 일 → 둘째 할 일 …
- * 순으로 limit 개까지. 같은 할 일은 한 번만 나온다.
+ * 고르기 메뉴의 후보를 이 순서로 limit 개까지: 어젯밤 정한 "내일 첫 작업" → 마감이 지났거나 7일 안인 할 일(마감 순)
+ * → 최근 커밋한 프로젝트의 첫 할 일(커밋이 많은 순) → 나머지 노트의 첫 할 일 → 둘째 할 일 …
+ * 마감일이 하나도 없어도 노트 이름순이 아니라 손대고 있는 일이 위에 오게 한다. 같은 할 일은 한 번만 나온다.
  */
-export function pickCandidates(vault: VaultState, limit = MAX_OPTIONS): TodayTask[] {
-  const notes = vault.notes.map((n) =>
+export function pickCandidates(vault: VaultState, order: PickOrder = {}, limit = MAX_OPTIONS): TodayTask[] {
+  const notes = activeFirst(vault.notes, order.active ?? []).map((n) =>
     n.tasks.map(
       (task): TodayTask => ({
-        id: createHash("sha1").update(`${n.note}\n${task.text}`).digest("hex").slice(0, 8),
+        id: taskId(n.note, task.text),
         projectSlug: n.slug ?? n.note,
         note: n.note,
         text: task.text,
@@ -75,26 +97,32 @@ export function pickCandidates(vault: VaultState, limit = MAX_OPTIONS): TodayTas
       }),
     ),
   );
-  const urgent = notes
-    .flat()
+  const all = notes.flat();
+  // 그 할 일이 밤사이 완료·수정·보류됐으면 여기서 찾지 못해 맨 앞 자리는 없다.
+  const firstId = order.first && taskId(order.first.note, order.first.text);
+  const urgent = all
     .filter((task) => task.due && daysUntil(task.due) <= 7)
     .sort((a, b) => (a.due ?? "").localeCompare(b.due ?? ""));
   const depth = Math.max(0, ...notes.map((tasks) => tasks.length));
   const rounds = Array.from({ length: depth }, (_, i) => notes.flatMap((tasks) => tasks[i] ?? []));
-  const unique = new Map([...urgent, ...rounds.flat()].map((task) => [task.id, task]));
+  const unique = new Map(
+    [...all.filter((task) => task.id === firstId), ...urgent, ...rounds.flat()].map((task) => [task.id, task]),
+  );
   return [...unique.values()].slice(0, limit);
 }
 
 /**
  * 다이제스트의 "오늘 할 일 고르기" 메뉴. 그날의 후보를 새로 뽑아 저장하고(이미 고른 것은 그대로 둔다)
- * 후보가 없으면 null. 보류한 할 일은 후보에서 빠진다.
+ * 후보가 없으면 null. 보류한 할 일은 후보에서 빠진다. 어젯밤 정한 첫 작업이 후보에 있으면 미리 골라 둔다.
  */
 export function todayPickMenu(
   vault: VaultState,
   date: string,
+  order: PickOrder = {},
 ): ActionRowBuilder<StringSelectMenuBuilder> | null {
-  const candidates = pickCandidates(withoutSnoozed(vault));
+  const candidates = pickCandidates(withoutSnoozed(vault), order);
   if (candidates.length === 0) return null;
+  const preselected = order.first && taskId(order.first.note, order.first.text);
   update((days) => {
     days[date] = { candidates, picks: days[date]?.picks ?? [] };
   });
@@ -109,6 +137,7 @@ export function todayPickMenu(
           label: clip(task.text, 100),
           description: clip(`${task.note}${task.due ? ` · 📅 ${task.due.slice(5)}` : ""}`, 100),
           value: task.id,
+          ...(task.id === preselected ? { default: true } : {}),
         })),
       ),
   );

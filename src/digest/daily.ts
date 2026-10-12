@@ -7,7 +7,8 @@ import { getInstagramBrief } from "../monitor/status-board.js";
 import { captureException } from "../observability/sentry.js";
 import { putPendingAction } from "../webhook/pending.js";
 import { ghJson } from "../github/api.js";
-import { getTodayFirstTask } from "../checkin/index.js";
+import { getTodayFirstTask, getTodayFirstTaskRef } from "../checkin/index.js";
+import { optional, recentlyActiveProjects, within } from "../daily-log/evidence.js";
 import { yesterdayLogSummary } from "../daily-log/index.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 import { todayPickMenu, todayPicksField } from "../task-loop/today.js";
@@ -22,6 +23,11 @@ import {
 
 // Daily digest at DIGEST_TIME (KST, no DST): last-24h commits + open PRs per
 // repo (GitHub API) + uptime snapshot. Also triggered on demand via /digest.
+
+// 고르기 메뉴가 최근 손댄 프로젝트의 할 일을 앞세우는 데만 쓰는 조회다.
+// 이 시간 안에 답이 없거나 실패하면 그 순서 없이 게시한다.
+const RECENT_DAYS = 3;
+const RECENT_TIMEOUT_MS = 5_000;
 
 export function startDailyDigest(): void {
   if (!env.DIGEST_TIME) {
@@ -55,6 +61,12 @@ function scheduleNext(): void {
 export async function postDigest(): Promise<boolean> {
   const channel = await fetchDigestChannel();
   if (!channel) return false;
+
+  // 아래의 레포별 조회와 나란히 걸어 두고 메뉴를 만들 때 받는다.
+  const recent = within(
+    RECENT_TIMEOUT_MS,
+    optional("recent commits", [], () => recentlyActiveProjects(RECENT_DAYS)),
+  );
 
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
   const repos = projects
@@ -166,7 +178,9 @@ export async function postDigest(): Promise<boolean> {
 
   // 할 일을 나열하는 대신 오늘 할 3개를 고르게 한다. 수동 /digest 는 후보만 새로 뽑고 고른 것은 그대로 보여준다.
   const today = todayKst();
-  const pickMenu = vault ? todayPickMenu(vault, today) : null;
+  const pickMenu = vault
+    ? todayPickMenu(vault, today, { first: getTodayFirstTaskRef(), active: (await recent) ?? [] })
+    : null;
   const picked = todayPicksField(today);
   if (picked) embed.addFields(picked);
 

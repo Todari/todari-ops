@@ -14,15 +14,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
-import { clip, collectActivity, renderSections, type DayEvidence } from "../daily-log/evidence.js";
+import { activeProjects, clip, collectActivity, renderSections, within } from "../daily-log/evidence.js";
 import { fetchDigestChannel, ownerMention } from "../discord/alerts.js";
-import { findProjectByRepoFullName } from "../projects.js";
 import { addDays, getVaultState, todayKst, type VaultState } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
 import { readJsonObject, writeJsonObject } from "../storage/json-file.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 import { withoutSnoozed } from "../task-loop/tidy.js";
-import { todayDoneRows, todayPicksField } from "../task-loop/today.js";
+import { activeFirst, todayDoneRows, todayPicksField } from "../task-loop/today.js";
 
 // 저녁 체크인: 21:30(KST) #daily 에 [회고 쓰기] 버튼 → 모달(오늘/막힘/내일)
 // → 제출 내용은 📥 인박스로 가서 스위퍼가 데일리 노트에 기록하고,
@@ -31,13 +30,26 @@ import { todayDoneRows, todayPicksField } from "../task-loop/today.js";
 // "내일 첫 작업" 후보 버튼을 붙인다. 후보를 한 번 누르면 모달 없이 저장된다.
 // 아침에 "오늘의 3개"를 골랐으면 그것과 완료 버튼(✅ 1~3) 한 줄도 붙는다(docs/task-loop.md).
 
+/** 볼트의 할 일 하나. 아침의 고르기 메뉴가 같은 할 일을 찾는 데 쓴다. */
+interface TaskRef {
+  note: string;
+  text: string;
+}
+
 interface CheckinState {
   date: string; // 체크인한 저녁의 KST 날짜
   tomorrow: string;
+  /** 후보 버튼으로 정했으면 그 할 일. 모달에 직접 쓴 글에는 없다. */
+  task?: TaskRef;
 }
 
-/** 한 저녁에 올린 "내일 첫 작업" 후보들: 버튼 id → 후보 원문과 올린 시각. 파일에는 저녁의 KST 날짜별로 둔다. */
-type Offered = Record<string, { label: string; at: number }>;
+/** "내일 첫 작업" 후보 하나: 버튼과 다이제스트에 보이는 문장(label)과 그 할 일. */
+export interface FirstTaskCandidate extends TaskRef {
+  label: string;
+}
+
+/** 한 저녁에 올린 후보들: 버튼 id → 후보와 올린 시각. 파일에는 저녁의 KST 날짜별로 둔다. */
+type Offered = Record<string, FirstTaskCandidate & { at: number }>;
 
 const FILE = path.resolve(env.WORK_DIR, "..", "checkin.json");
 // 후보 버튼이 저녁 배포(봇 재시작)를 넘기도록 메모리가 아니라 /data 에 둔다.
@@ -103,7 +115,7 @@ async function oneTapExtras(
   date: string,
 ): Promise<{ embeds: EmbedBuilder[]; rows: Array<ActionRowBuilder<ButtonBuilder>> }> {
   try {
-    const activity = await activitySoFar(date);
+    const activity = await within(ACTIVITY_TIMEOUT_MS, collectActivity(date));
     const fields = (activity ? renderSections(activity) : []).map((section) => ({
       name: section.title,
       // 임베드에서는 위키링크가 걸리지 않는다. 노트 이름만 남긴다.
@@ -117,9 +129,7 @@ async function oneTapExtras(
         : [];
     const vault = getVaultState();
     // 오늘 커밋한 레포의 노트를 앞에 세운다(커밋이 많은 순).
-    const active = (activity?.commits ?? []).map(
-      (repo) => findProjectByRepoFullName(repo.fullName)?.slug ?? repo.repo,
-    );
+    const active = activeProjects(activity?.commits ?? []);
     // 긴 한글 문장이 잘리지 않게 후보마다 한 줄을 쓴다. 라벨은 잘려도 원문은 /data 에 남는다.
     // 보류(4주)한 할 일은 후보로 권하지 않는다.
     const candidates = vault ? firstTaskCandidates(withoutSnoozed(vault), active) : [];
@@ -127,7 +137,7 @@ async function oneTapExtras(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(`checkin:pick:${date}:${id}`)
-          .setLabel(clip(`🎯 ${task}`, 78))
+          .setLabel(clip(`🎯 ${task.label}`, 78))
           .setStyle(ButtonStyle.Secondary),
       ),
     );
@@ -140,46 +150,43 @@ async function oneTapExtras(
 }
 
 /** 후보마다 버튼 id 를 붙여 그 저녁의 후보로 남긴다. 읽고·고치고·쓰기를 한 틱에 끝낸다. */
-function offerCandidates(date: string, candidates: string[]): Array<[id: string, label: string]> {
-  const offered = candidates.map((label): [string, string] => [randomUUID().slice(0, 8), label]);
+function offerCandidates(
+  date: string,
+  candidates: FirstTaskCandidate[],
+): Array<[id: string, candidate: FirstTaskCandidate]> {
+  const offered = candidates.map((c): [string, FirstTaskCandidate] => [randomUUID().slice(0, 8), c]);
   if (offered.length === 0) return offered;
   const days = readJsonObject<Offered>(CANDIDATES_FILE);
   const at = Date.now();
   // 같은 저녁에 수동 /checkin 으로 또 올려도 먼저 올린 메시지의 버튼이 살아 있게 더한다.
-  days[date] = { ...days[date], ...Object.fromEntries(offered.map(([id, label]) => [id, { label, at }])) };
+  days[date] = { ...days[date], ...Object.fromEntries(offered.map(([id, c]) => [id, { ...c, at }])) };
   const oldest = addDays(date, -KEEP_CANDIDATE_DAYS);
   writeJsonObject(CANDIDATES_FILE, Object.fromEntries(Object.entries(days).filter(([day]) => day >= oldest)));
   return offered;
-}
-
-function activitySoFar(date: string): Promise<DayEvidence | null> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), ACTIVITY_TIMEOUT_MS);
-  });
-  return Promise.race([collectActivity(date), timeout]).finally(() => clearTimeout(timer));
 }
 
 /**
  * "내일 첫 작업" 후보: 마감이 가까운 할 일 → 오늘 손댄 프로젝트(activeSlugs 순)의 첫 할 일
  * → 나머지 노트의 첫 할 일. 다이제스트의 태스크 버튼과 달리 카탈로그 밖 노트도 후보다.
  */
-export function firstTaskCandidates(vault: VaultState, activeSlugs: string[], limit = 3): string[] {
-  const active = activeSlugs.map((slug) => slug.toLowerCase());
-  const rank = (note: { note: string; slug?: string }) => {
-    const index = active.indexOf((note.slug ?? note.note).toLowerCase());
-    return index < 0 ? active.length : index;
-  };
+export function firstTaskCandidates(
+  vault: VaultState,
+  activeSlugs: string[],
+  limit = 3,
+): FirstTaskCandidate[] {
   const dated = vault.notes
     .flatMap((n) => n.tasks.filter((t) => t.due).map((t) => ({ note: n.note, ...t })))
     .sort((a, b) => (a.due ?? "").localeCompare(b.due ?? ""));
-  const firsts = [...vault.notes]
-    .sort((a, b) => rank(a) - rank(b))
-    .flatMap((n) => (n.tasks[0] ? [{ note: n.note, ...n.tasks[0] }] : []));
-  const texts = [...dated, ...firsts].map(
-    (c) => `${c.note} · ${c.text}${c.due ? ` (📅 ${c.due.slice(5)})` : ""}`,
+  const firsts = activeFirst(vault.notes, activeSlugs).flatMap((n) =>
+    n.tasks[0] ? [{ note: n.note, ...n.tasks[0] }] : [],
   );
-  return [...new Set(texts)].slice(0, limit);
+  const candidates = [...dated, ...firsts].map(({ note, text, due }) => ({
+    label: `${note} · ${text}${due ? ` (📅 ${due.slice(5)})` : ""}`,
+    note,
+    text,
+  }));
+  // 마감 순과 노트의 첫 할 일에 함께 든 할 일은 한 번만.
+  return [...new Map(candidates.map((c) => [c.label, c])).values()].slice(0, limit);
 }
 
 /** 후보 버튼 한 번으로 "내일 첫 작업"을 정한다. 후보 버튼은 고른 내용 한 줄로 바뀌고 회고·완료 버튼은 남는다. */
@@ -188,7 +195,7 @@ export async function pickTomorrowFirstTask(interaction: ButtonInteraction): Pro
   const [, , date, id] = interaction.customId.split(":");
   const offered = date && id ? readJsonObject<Offered>(CANDIDATES_FILE)[date]?.[id] : undefined;
   // 오래된 체크인의 버튼이 그 뒤에 정한 "내일 첫 작업"을 덮지 않게, 올린 지 12시간이 지난 후보는 받지 않는다.
-  const task = offered && Date.now() - offered.at <= PICK_TTL_MS ? offered.label : undefined;
+  const task = offered && Date.now() - offered.at <= PICK_TTL_MS ? offered : undefined;
   if (!date || !task) {
     await interaction.reply({
       content: "이 후보는 만료됨 (12시간) — 📝 회고 쓰기에 적어주세요",
@@ -196,9 +203,9 @@ export async function pickTomorrowFirstTask(interaction: ButtonInteraction): Pro
     });
     return;
   }
-  await saveTomorrowFirstTask(date, task);
+  await saveTomorrowFirstTask(date, task.label, { note: task.note, text: task.text });
   await interaction.update({
-    content: `${interaction.message.content}\n🎯 내일 첫 작업: ${task}`,
+    content: `${interaction.message.content}\n🎯 내일 첫 작업: ${task.label}`,
     components: [openRow(date), ...todayDoneRows(date)],
   });
 }
@@ -224,8 +231,13 @@ export function buildCheckinModal(date: string): ModalBuilder {
     );
 }
 
-export async function saveTomorrowFirstTask(date: string, tomorrow: string): Promise<void> {
-  const state: CheckinState = { date, tomorrow };
+/** task: 후보 버튼으로 정했을 때 그 할 일. 다음 날 고르기 메뉴가 같은 할 일을 맨 앞에 미리 골라 둔다. */
+export async function saveTomorrowFirstTask(
+  date: string,
+  tomorrow: string,
+  task?: TaskRef,
+): Promise<void> {
+  const state: CheckinState = { date, tomorrow, ...(task ? { task } : {}) };
   await mkdir(path.dirname(FILE), { recursive: true });
   const tmp = FILE + ".tmp";
   await writeFile(tmp, JSON.stringify(state, null, 2));
@@ -242,14 +254,24 @@ function readState(): CheckinState | null {
   }
 }
 
-/** 어젯밤(또는 오늘) 체크인의 "내일 첫 작업" — 신선할 때만 반환. */
-export function getTodayFirstTask(): string | null {
+/** 어젯밤(또는 오늘) 체크인의 상태 — 신선할 때만. */
+function freshState(): CheckinState | null {
   const state = readState();
   if (!state) return null;
   const age = Date.parse(todayKst()) - Date.parse(state.date);
   // 어제 저녁(1일 차) 또는 오늘 새벽 체크인만 유효
   if (Number.isNaN(age) || age < 0 || age > 86_400_000) return null;
-  return state.tomorrow;
+  return state;
+}
+
+/** 어젯밤(또는 오늘) 체크인의 "내일 첫 작업" — 신선할 때만 반환. */
+export function getTodayFirstTask(): string | null {
+  return freshState()?.tomorrow ?? null;
+}
+
+/** 그 "내일 첫 작업"이 후보 버튼으로 정한 볼트의 할 일이면 그 노트와 문장. 직접 쓴 글이면 null. */
+export function getTodayFirstTaskRef(): TaskRef | null {
+  return freshState()?.task ?? null;
 }
 
 /** 그 날짜(KST) 저녁 체크인에서 정한 "내일 첫 작업". 자동 데일리 기록에 들어간다. */
