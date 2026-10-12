@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { collectWorkflowFailureEvidence, resolveReleaseCommit, sanitizeDiagnosticText } from "./api.js";
+import { collectWorkflowFailureEvidence, ghJson, ghPost, resolveReleaseCommit, sanitizeDiagnosticText } from "./api.js";
 
 vi.mock("../env.js", () => ({ env: { GITHUB_TOKEN: "private-fixture-token" } }));
 const sha = "a".repeat(40);
@@ -103,5 +103,37 @@ describe("release identity and sensitive data", () => {
     ].join("\n"));
     expect(safe).not.toMatch(/abc123|password@|with spaces|abc.def.ghi|ghp_privatefixture|base64secret|truncatedsecret/);
     expect(safe).toContain("[REDACTED");
+  });
+});
+
+describe("ghPost", () => {
+  it("posts JSON with the token and headers of ghJson and returns null on any failure", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetcher = vi.fn(async () => json({ html_url: "https://github.com/acme/widgets/issues/7" }));
+    vi.stubGlobal("fetch", fetcher);
+    const issue = { title: "결제 실패 재시도 추가", body: "@claude 아래 할 일을 맡아줘." };
+    const shared = {
+      Accept: "application/vnd.github+json", "User-Agent": "todari-ops/1.0", Authorization: "Bearer private-fixture-token",
+    };
+
+    expect(await ghPost("/repos/acme/widgets/issues", issue)).toEqual({ html_url: "https://github.com/acme/widgets/issues/7" });
+    const [url, post] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.github.com/repos/acme/widgets/issues");
+    expect(post).toMatchObject({ method: "POST", body: JSON.stringify(issue) });
+    expect(post.headers).toEqual({ ...shared, "Content-Type": "application/json" });
+
+    // 읽기는 그대로 본문 없는 GET 이다.
+    await ghJson("/repos/acme/widgets");
+    const [, get] = fetcher.mock.calls[1] as unknown as [string, RequestInit];
+    expect(get).not.toHaveProperty("method");
+    expect(get).not.toHaveProperty("body");
+    expect(get.headers).toEqual(shared);
+
+    fetcher.mockResolvedValueOnce(new Response(null, { status: 403 }));
+    expect(await ghPost("/repos/acme/widgets/issues", issue)).toBeNull();
+    fetcher.mockRejectedValueOnce(new Error("network"));
+    expect(await ghPost("/repos/acme/widgets/issues", issue)).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(4); // 실패한 쓰기를 다시 보내지 않는다
+    warn.mockRestore();
   });
 });

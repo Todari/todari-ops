@@ -8,6 +8,7 @@ import { captureException } from "../observability/sentry.js";
 import { putPendingAction } from "../webhook/pending.js";
 import { ghJson } from "../github/api.js";
 import { getTodayFirstTask, getTodayFirstTaskRef } from "../checkin/index.js";
+import { delegateRows } from "../delegate/index.js";
 import { optional, recentlyActiveProjects, within } from "../daily-log/evidence.js";
 import { yesterdayLogSummary } from "../daily-log/index.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
@@ -67,6 +68,11 @@ export async function postDigest(): Promise<boolean> {
     RECENT_TIMEOUT_MS,
     optional("recent commits", [], () => recentlyActiveProjects(RECENT_DAYS)),
   );
+  // ▶ 버튼과 위임 버튼(docs/delegation.md)이 함께 쓰는 후보. 위임 줄은 레포가 준비됐는지 GitHub 에 물어야 해서
+  // 마찬가지로 지금 걸어 두고 버튼을 붙일 때 받는다. 실패하면 그 줄만 빠진다.
+  const vault = getVaultState();
+  const top = vault ? topTasks(vault) : [];
+  const delegate = optional("delegate buttons", [], () => delegateRows(top));
 
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
   const repos = projects
@@ -102,7 +108,6 @@ export async function postDigest(): Promise<boolean> {
   if (logged) embed.addFields({ name: "📓 어제 기록", value: logged });
 
   // --- vault snapshot (Mac cron + bot-side task mutations; may be absent/stale) ---
-  const vault = getVaultState();
   const isMondayKst = new Date(Date.now() + 9 * 3600_000).getUTCDay() === 1;
   if (vault && isMondayKst) {
     const week = collectDeadlines(vault, 0, 7);
@@ -184,7 +189,7 @@ export async function postDigest(): Promise<boolean> {
   const picked = todayPicksField(today);
   if (picked) embed.addFields(picked);
 
-  const components = [...(pickMenu ? [pickMenu] : []), ...(vault ? buildTaskButtons(vault) : [])];
+  const components = [...(pickMenu ? [pickMenu] : []), ...buildTaskButtons(top), ...(await delegate)];
   // 아침 브리프는 하루 한 번 푸시로 도착을 알린다(서버 알림 기본값이 "@멘션만").
   await channel.send({ ...ownerMention(), embeds: [embed], components });
   void updateDailyTopic();
@@ -219,8 +224,10 @@ export async function updateDailyTopic(): Promise<void> {
 // map to catalog projects. 12h TTL so a late-morning tap still works.
 const TASK_BUTTON_TTL_MS = 12 * 3600_000;
 
-function buildTaskButtons(vault: VaultState): Array<ActionRowBuilder<ButtonBuilder>> {
-  const candidates: Array<{ slug: string; note: string; text: string; due?: string }> = [];
+type TaskCandidate = { slug: string; note: string; text: string; due?: string };
+
+function topTasks(vault: VaultState): TaskCandidate[] {
+  const candidates: TaskCandidate[] = [];
   for (const n of vault.notes) {
     const slug = n.slug ?? n.note;
     if (!findProject(slug)) continue;
@@ -229,7 +236,10 @@ function buildTaskButtons(vault: VaultState): Array<ActionRowBuilder<ButtonBuild
     }
   }
   candidates.sort((a, b) => (a.due ?? "9999").localeCompare(b.due ?? "9999"));
-  const top = candidates.slice(0, 3);
+  return candidates.slice(0, 3);
+}
+
+function buildTaskButtons(top: TaskCandidate[]): Array<ActionRowBuilder<ButtonBuilder>> {
   if (top.length === 0) return [];
 
   const row = new ActionRowBuilder<ButtonBuilder>();

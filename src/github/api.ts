@@ -197,14 +197,29 @@ export async function collectWorkflowFailureEvidence(args: {
   return lines.join("\n");
 }
 
-export async function ghJson<T>(path: string): Promise<T | null> {
+export function ghJson<T>(path: string): Promise<T | null> {
+  return ghRequest<T>(path);
+}
+
+// The only write: same token, headers and null-on-failure contract as ghJson.
+// Never retried — a POST that timed out may still have been applied.
+export function ghPost<T>(path: string, body: unknown): Promise<T | null> {
+  return ghRequest<T>(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+async function ghRequest<T>(
+  path: string,
+  init: { method?: string; body?: string } = {},
+): Promise<T | null> {
   try {
     const headers: Record<string, string> = {
       Accept: "application/vnd.github+json",
       "User-Agent": "todari-ops/1.0",
     };
     if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+    if (init.body) headers["Content-Type"] = "application/json";
     const res = await fetch(`${GITHUB_API}${path}`, {
+      ...init,
       headers,
       signal: AbortSignal.timeout(15_000),
     });
