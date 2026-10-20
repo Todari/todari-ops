@@ -465,7 +465,8 @@ def check_jakkuyagu(state: dict, now: datetime, ledger: ReliabilityLedger) -> No
         day_games = [
             game
             for game in kbo.fetch_games(game_date)
-            if game.get("roundCode") in {None, "kbo_r"}
+            # 정규시즌·포스트시즌만 게시 대상이다(시범경기 제외). 야있날 feed_policy.is_league_game과 같은 규칙.
+            if (game.get("roundCode") in {None, "kbo_r"} or str(game.get("roundCode")).startswith("kbo_ps"))
             and not _jakkuyagu_game_cancelled(game)
         ]
         games = [game for game in day_games if game.get("statusCode") == "RESULT"]

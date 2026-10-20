@@ -425,6 +425,32 @@ class InstagramWatchdogTest(unittest.TestCase):
             state["_instagram_insights_accounts"], list(watchdog.INSIGHTS_ACCOUNTS)
         )
 
+    def test_yaitnal_postseason_games_are_expected_but_exhibitions_are_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "jakkuyagu" / "state").mkdir(parents=True)
+            game = {"statusCode": "RESULT", "cancel": None, "gameDateTime": "2026-10-20T18:30:00+09:00"}
+            fake_kbo = types.SimpleNamespace(
+                fetch_games=lambda game_date: [
+                    {**game, "gameId": "ps-3", "roundCode": "kbo_ps_sp"},
+                    {**game, "gameId": "exhibition", "roundCode": "kbo_e"},
+                ] if game_date == "2026-10-20" else []
+            )
+            ledger = ReliabilityLedger(root / "jobs.sqlite3")
+            try:
+                with (
+                    patch.dict(sys.modules, {"kbo": fake_kbo}),
+                    patch.object(watchdog, "HOME", root),
+                    patch.object(watchdog, "_alert_once"),
+                    patch.object(watchdog, "_run_recovery"),
+                ):
+                    watchdog.check_jakkuyagu({}, datetime(2026, 10, 20, 22, 0, tzinfo=KST), ledger)
+                job_ids = {row[0] for row in ledger.connection.execute("SELECT job_id FROM jobs")}
+            finally:
+                ledger.close()
+        self.assertIn("jakkuyagu:flow:ps-3", job_ids)
+        self.assertNotIn("jakkuyagu:flow:exhibition", job_ids)
+
     def test_yaitnal_reel_recovery_waits_for_shared_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
