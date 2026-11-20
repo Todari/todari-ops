@@ -28,7 +28,7 @@ import {
   collectDeadlines,
   ddayLabel,
   getVaultState,
-  vaultAgeHours,
+  vaultSyncSummary,
 } from "../vault/state.js";
 import { answerQuestion, correctSentence } from "../jp/tutor.js";
 import { dueCards, insertMistake } from "../jp/cards.js";
@@ -210,10 +210,8 @@ async function handleStatus(interaction: ChatInputCommandInteraction): Promise<v
       .map((n) => `${n.note} ${n.tasks.length}`)
       .join(" · ");
     if (counts) embed.addFields({ name: "📋 열린 할 일", value: counts.slice(0, 1000) });
-    embed.setFooter({ text: `볼트 동기화 ${Math.round(vaultAgeHours(vault))}시간 전` });
-  } else {
-    embed.addFields({ name: "볼트", value: "동기화 데이터 없음 (Mac vault_sync 크론 대기 중)" });
   }
+  embed.addFields({ name: "볼트", value: vaultSyncSummary(vault) });
 
   await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
@@ -246,7 +244,16 @@ async function handleRemind(interaction: ChatInputCommandInteraction): Promise<v
     });
     return;
   }
-  await addReminder({ channelId: interaction.channelId, content, fireAt });
+  try {
+    await addReminder({ channelId: interaction.channelId, content, fireAt });
+  } catch (err) {
+    console.warn("[remind] save failed:", (err as Error).name);
+    await interaction.reply({
+      content: "⚠️ 리마인더를 저장하지 못했어요. 잠시 후 다시 시도해 주세요.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
   const kst = new Date(fireAt + 9 * 3600_000).toISOString().slice(5, 16).replace("T", " ");
   await interaction.reply({
     content: `⏰ ${kst} KST 에 이 채널에서 알려드릴게요 — "${truncate(content, 80)}"`,

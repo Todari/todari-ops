@@ -1,11 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createHash } from "node:crypto";
+import path from "node:path";
 import { env } from "../env.js";
 import { captureException } from "../observability/sentry.js";
 import { verifyGithub, verifyInstagram, verifySentry, verifyVercel } from "./verify.js";
 import { handleSentryEvent } from "./sentry-handler.js";
 import { handleGithubEvent } from "./github-handler.js";
-import { handleVercelEvent } from "./vercel-handler.js";
-import { normalizeVaultState, saveVaultState } from "../vault/state.js";
+import { handleVercelEvent, vercelDelivery } from "./vercel-handler.js";
+import { DeliveryQueue } from "../storage/delivery.js";
+import { normalizeVaultState, saveVaultSnapshot } from "../vault/state.js";
 import { updateDailyTopic } from "../digest/daily.js";
 import { jpExport } from "../jp/export.js";
 import {
@@ -16,9 +19,29 @@ import {
 } from "./instagram-handler.js";
 import { getDiscordClient } from "../discord/client.js";
 import { isDiscordConnected, runtimeHealth } from "../monitor/health.js";
+import { macProbeHealth, receiveMacProbe } from "../monitor/mac-probe.js";
 import { saveInstagramBrief, updateStatusBoard } from "../monitor/status-board.js";
 
 const MAX_BODY_BYTES = 1_000_000;
+
+type AlertEvent =
+  | { source: "github"; eventName: string; payload: unknown }
+  | { source: "sentry"; slug: string; payload: unknown }
+  | { source: "vercel"; projectName: string; payload: unknown };
+
+const alertDelivery = new DeliveryQueue<AlertEvent>(
+  path.resolve(env.WORK_DIR, "..", "webhook-alerts.json"),
+  (event, id) => {
+    const nonce = id.slice(0, 25);
+    switch (event.source) {
+      case "github": return handleGithubEvent(event.eventName, event.payload, nonce);
+      case "sentry": return handleSentryEvent(event.slug, event.payload, nonce);
+      case "vercel": return handleVercelEvent(event.payload, nonce);
+    }
+    throw new Error("Unknown queued webhook source");
+  },
+  (event) => event?.source === "vercel" ? `vercel:${event.projectName}` : undefined,
+);
 
 // 인스타 워치독(EC2 크론 15분)이 실행마다 보내는 생존 신호의 점검 이름.
 const WATCHDOG_CHECK = "instagram-watchdog";
@@ -35,7 +58,7 @@ export function startWebhookServer(): ReturnType<typeof createServer> {
     console.log("[webhook] inbound routes disabled; serving /healthz only");
   }
   if (env.WEBHOOK_ENABLED && !env.ALERTS_CHANNEL_ID) {
-    console.warn("[webhook] ALERTS_CHANNEL_ID missing — inbound alerts will be dropped");
+    console.warn("[webhook] ALERTS_CHANNEL_ID missing — inbound alerts will remain queued");
   }
   for (const [name, secret] of [
     ["sentry", env.SENTRY_WEBHOOK_SECRET],
@@ -53,6 +76,7 @@ export function startWebhookServer(): ReturnType<typeof createServer> {
       writeJson(res, 500, { error: "internal" });
     });
   });
+  if (env.WEBHOOK_ENABLED) server.once("close", alertDelivery.start());
   server.listen(env.PORT, () => {
     console.log(`[webhook] listening on :${env.PORT}`);
   });
@@ -65,7 +89,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   if (method === "GET" && url === "/healthz") {
     const health = runtimeHealth.snapshot(isDiscordConnected(getDiscordClient()));
-    writeJson(res, health.ok ? 200 : 503, health);
+    writeJson(res, health.ok ? 200 : 503, { ...health, macProbe: macProbeHealth() });
     return;
   }
 
@@ -89,6 +113,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
   if (method === "POST" && url === "/webhook/vault-sync") {
     await handleVaultSync(req, res);
+    return;
+  }
+  if (method === "POST" && url === "/webhook/mac-monitor") {
+    await handleMacMonitor(req, res);
     return;
   }
   if (method === "POST" && url === "/webhook/instagram") {
@@ -152,6 +180,25 @@ async function handleInstagramWebhook(
   writeJson(res, 200, { ok: true, delivered });
 }
 
+async function handleMacMonitor(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!env.VAULT_SYNC_SECRET) {
+    writeJson(res, 503, { error: "Mac monitor disabled" });
+    return;
+  }
+  const body = await readBody(req);
+  if (!verifySentry(body, headerValue(req, "x-vault-signature"), env.VAULT_SYNC_SECRET)) {
+    writeJson(res, 401, { error: "invalid signature" });
+    return;
+  }
+  const payload = parseJson(body, res);
+  if (payload === undefined) return;
+  if (!receiveMacProbe(payload)) {
+    writeJson(res, 400, { error: "invalid probe" });
+    return;
+  }
+  writeJson(res, 200, { ok: true });
+}
+
 // Mac-side cron (workspace-harness vault_sync.py) pushes extracted vault
 // tasks/deadlines here. Same HMAC-SHA256-hex scheme as the Sentry hook.
 async function handleVaultSync(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -171,7 +218,11 @@ async function handleVaultSync(req: IncomingMessage, res: ServerResponse): Promi
     writeJson(res, 400, { error: "invalid shape" });
     return;
   }
-  await saveVaultState(state);
+  const result = await saveVaultSnapshot(state);
+  if (result !== "stored") {
+    writeJson(res, 409, { error: result });
+    return;
+  }
   const tasks = state.notes.reduce((s, n) => s + n.tasks.length, 0);
   const deadlines = state.notes.reduce((s, n) => s + n.deadlines.length, 0);
   console.log(
@@ -214,12 +265,7 @@ async function handleSentryWebhook(
   const payload = parseJson(body, res);
   if (payload === undefined) return;
 
-  // Respond fast; do Discord post async so Sentry's 3s timeout never trips.
-  writeJson(res, 200, { ok: true });
-  void handleSentryEvent(slug, payload).catch((err) => {
-    console.error("[webhook] sentry handler error:", err);
-    captureException(err, { kind: "sentry-handler", slug });
-  });
+  acceptAlert(res, { source: "sentry", slug, payload }, slug, body);
 }
 
 async function handleGithubWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -236,11 +282,12 @@ async function handleGithubWebhook(req: IncomingMessage, res: ServerResponse): P
   if (payload === undefined) return;
   const eventName = headerValue(req, "x-github-event") ?? "unknown";
 
+  if (eventName === "pull_request" || eventName === "workflow_run") {
+    acceptAlert(res, { source: "github", eventName, payload }, eventName, headerValue(req, "x-github-delivery") || body);
+    return;
+  }
+  if (eventName === "ping") await handleGithubEvent(eventName, payload, "");
   writeJson(res, 200, { ok: true });
-  void handleGithubEvent(eventName, payload).catch((err) => {
-    console.error("[webhook] github handler error:", err);
-    captureException(err, { kind: "github-handler", eventName });
-  });
 }
 
 async function handleVercelWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -256,11 +303,19 @@ async function handleVercelWebhook(req: IncomingMessage, res: ServerResponse): P
   const payload = parseJson(body, res);
   if (payload === undefined) return;
 
+  const deployment = vercelDelivery(payload);
+  if (deployment) {
+    acceptAlert(res, { source: "vercel", projectName: deployment.projectName, payload }, deployment.type, deployment.deploymentId || body);
+    return;
+  }
   writeJson(res, 200, { ok: true });
-  void handleVercelEvent(payload).catch((err) => {
-    console.error("[webhook] vercel handler error:", err);
-    captureException(err, { kind: "vercel-handler" });
-  });
+}
+
+function acceptAlert(res: ServerResponse, event: AlertEvent, scope: string, identity: string | Buffer): void {
+  const id = createHash("sha256").update(JSON.stringify([event.source, scope])).update(identity).digest("hex");
+  alertDelivery.enqueue(id, event);
+  writeJson(res, 200, { ok: true });
+  void alertDelivery.retry();
 }
 
 function headerValue(req: IncomingMessage, name: string): string | undefined {

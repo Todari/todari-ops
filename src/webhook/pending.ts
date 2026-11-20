@@ -14,30 +14,36 @@ export interface PendingAction {
   ttlMs: number;
 }
 
-const store = new Map<string, PendingAction>();
+const store = new Map<string, { action?: PendingAction; expiresAt: number }>();
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 
 export function putPendingAction(
   action: Omit<PendingAction, "createdAt" | "ttlMs">,
   ttlMs = DEFAULT_TTL_MS,
+  stableId?: string,
 ): string {
   prune();
-  const id = randomUUID().slice(0, 8);
-  store.set(id, { ...action, createdAt: Date.now(), ttlMs });
+  const id = stableId ?? randomUUID().slice(0, 8);
+  const prior = stableId ? store.get(id) : undefined;
+  if (!prior || prior.action) {
+    const createdAt = Date.now();
+    store.set(id, { action: { ...action, createdAt, ttlMs }, expiresAt: createdAt + ttlMs });
+  }
   return id;
 }
 
 export function getPendingAction(id: string): PendingAction | undefined {
   prune();
-  return store.get(id);
+  return store.get(id)?.action;
 }
 
 export function deletePendingAction(id: string): void {
-  store.delete(id);
+  const entry = store.get(id);
+  if (entry) delete entry.action;
 }
 
 function prune(now = Date.now()): void {
   for (const [k, v] of store) {
-    if (now - v.createdAt > v.ttlMs) store.delete(k);
+    if (now > v.expiresAt) store.delete(k);
   }
 }

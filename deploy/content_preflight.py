@@ -1,4 +1,4 @@
-"""Offline runtime checks before replacing the running bot. No model or publish calls."""
+"""Offline runtime checks before replacing the content worker. No model or publish calls."""
 import importlib
 import os
 from pathlib import Path
@@ -9,6 +9,10 @@ import tempfile
 
 
 def main():
+    if os.environ.get('WORK_DIR'):
+        # The bot owns job.json; only the worker's execution records need write access.
+        with tempfile.TemporaryFile(dir=Path(os.environ['WORK_DIR']) / 'content'):
+            pass
     for module in ('PIL', 'google.genai', 'boto3'):
         importlib.import_module(module)
     for command in ('ffmpeg', 'ffprobe', 'node', 'npm'):

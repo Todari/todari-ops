@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { writeJsonFile } from "../storage/json-file.js";
 export type Kind = "waenyamyeon" | "instatoon";
 export type State = "queued" | "generating" | "review" | "draft" | "revising" | "recovering" | "approved" | "publishing" | "published" | "failed" | "rejected" | "uncertain";
 export interface RevisionProposal {
@@ -10,6 +11,7 @@ export interface RevisionProposal {
 export const MAX_GENERATION_ATTEMPTS = 3;
 export interface Job {
   id: string; kind: Kind; topic: string; body: string; channel: string;
+  execution?: { id: string; action: "generate" | "publish" | "revise" | "recover-revision" };
   state: State; created: string; hash?: string; approvedHash?: string;
   sourceMessageId?: string; retryOf?: string; message?: string; error?: string; mediaId?: string; generationAttempts?: number;
   /** Discord thread where the operator types revision requests for this job. */
@@ -29,8 +31,7 @@ export class JobStore {
   get(id: string): Job { return JSON.parse(readFileSync(join(this.path(id), "job.json"), "utf8")); }
   save(job: Job): void {
     const dir = this.path(job.id); mkdirSync(dir, { recursive: true });
-    const tmp = join(dir, `job.${randomUUID()}.tmp`);
-    writeFileSync(tmp, JSON.stringify(job, null, 2)); renameSync(tmp, join(dir, "job.json"));
+    writeJsonFile(join(dir, "job.json"), job);
   }
   list(): Job[] {
     const jobs: Job[] = [];
@@ -106,6 +107,7 @@ export class JobStore {
   }
   recover(): void {
     for (const job of this.list()) {
+      if (job.execution) continue; // A separate worker may still be finishing this request.
       if (job.state === "revising") {
         // Never expose partially modified media with the previous approval hash.
         job.state = "recovering"; job.hash = undefined; job.approvedHash = undefined;

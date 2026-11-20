@@ -33,7 +33,7 @@
 
 ## EC2 설정
 
-기본 런타임은 Alpine이며 콘텐츠 기능은 opt-in이다. `deploy/compose.sh`와 GitHub Actions 배포는 EC2 `.env.content`의 `CONTENT_ENABLED=true`를 읽어 `Dockerfile.content`와 compose overlay를 선택한다. 2026-10-01 커밋 `4431f00`부터 이 경로가 main 자동 배포에 포함됐다(`.github/workflows/deploy.yml`이 EC2에서 `bash deploy/compose.sh deploy`를 실행). 그 전의 격리 릴리스 직접 배포 기록은 [배포 증빙](todatoon-deploy-2026-09-14.md)에 남아 있다. 미설정·false·0이면 기본 런타임, true·1이면 콘텐츠 런타임이며 오타는 배포를 중단한다. 단일 bot replica를 유지한다.
+기본 봇은 Alpine 이미지에서 Discord 접수·승인·결과 알림을 담당한다. EC2에서 `CONTENT_ENABLED=true`이면 별도 `content-worker`가 공유 볼륨의 승인된 실행 요청을 순서대로 처리한다. 워커용 모델·게시 설정은 `.env.content`에 둔다. CPU 1개·메모리 1800MiB 제한과 제작 레포 마운트는 워커에 적용한다. 두 서비스 모두 한 인스턴스를 사용한다.
 
 1. EC2의 전용 경로에 `waenyamyeon`, `instatoon-studio`를 배치한다. `.env`, macOS `node_modules`, 캐시를 복사하지 않는다. 두 제작 레포는 현재 최초 커밋 전이므로 원격 git clone 가능 여부를 먼저 확인한다.
 2. `waenyamyeon`에서 **Linux Node 22 환경**으로 `npm ci`. `episodes/ep001.json`, `public/anchor/anchor.png`, `public/fonts/`(IBM Plex 및 OFL), `public/sfx/`의 공통 합성 효과음, `instatoon-studio/bible/sheets/core-cast-turnaround-v1.png`를 포함한다. 작업 루트·episodes·public·assets는 컨테이너 사용자 UID 1000이 쓸 수 있어야 한다.
@@ -64,7 +64,9 @@ bash deploy/compose.sh deploy
 bash deploy/compose.sh logs --tail=50 bot
 ```
 
-배포는 이미지를 빌드한 뒤 임시 컨테이너에서 Python 모듈·ffmpeg·Remotion 의존성·Chromium 실행·필수 원화와 글꼴·제작 경로 쓰기 권한을 검사한다. 검사에 실패하면 기존 봇을 교체하지 않는다. 바인드 경로가 없을 때 빈 디렉터리를 자동 생성하지 않는다. 이 검사는 모델 API와 게시 API를 호출하지 않으며 실제 한 편의 렌더/음성 품질 검증을 대신하지 않는다.
+기본 배포는 봇을 먼저 기동하고 워커 이미지에서 Python·ffmpeg·Remotion·Chromium·글꼴·작업 경로를 점검한다. 워커 점검이 실패하면 새 봇은 가동되고 기존 워커가 유지된다. 독립 배포 명령은 `bash deploy/compose.sh deploy bot`과 `bash deploy/compose.sh deploy content-worker`다. GitHub Actions에서 deploy를 수동 실행할 때도 같은 대상(`all`, `bot`, `content-worker`)을 선택할 수 있다. 최초 설치는 기본 배포를 사용한다. 작업 볼륨의 하위 경로 마운트를 지원하는 Docker Engine과 Compose가 필요하다.
+
+봇은 `job.json`에 실행 ID와 상태를 함께 저장하고 워커는 같은 ID의 결과를 기록한다. 봇 재시작 후에도 진행 중 요청을 기다린다. 워커가 게시 중 중단됐으면 기존 게시 영수증을 확인하고, 영수증이 없으면 결과 확인 대기로 보낸다. 콘텐츠 기능을 끈 뒤 배포하면 기존 워커를 중지한다.
 
 ## 승인과 장애 복구
 

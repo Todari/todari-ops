@@ -10,7 +10,7 @@ import { handleThreadMessage } from "./handlers/thread-message.js";
 import { handleNaturalMessage } from "./nl/router.js";
 import { handleVoiceMessage } from "./voice/index.js";
 import { handleButton } from "./handlers/button.js";
-import { handleModalSubmit } from "./handlers/modal.js";
+import { handleModalSubmit, startCheckinInbox } from "./handlers/modal.js";
 import { handleSelect } from "./handlers/select.js";
 import { startWebhookServer } from "./webhook/server.js";
 import { startUptimeMonitor } from "./monitor/uptime.js";
@@ -38,10 +38,18 @@ const client = createClient();
 // Health is available even when inbound webhook routes are disabled.
 startWebhookServer();
 
-client.once(Events.ClientReady, async (c) => {
+function syncSlashCommands(): void {
+  void registerSlashCommands(env.DISCORD_APP_ID, env.DISCORD_GUILD_ID).catch((err) => {
+    console.warn("[bot] slash command registration will retry:", (err as Error).name);
+    captureException(err, { kind: "slash-command-registration" });
+    setTimeout(syncSlashCommands, 60_000).unref();
+  });
+}
+
+client.once(Events.ClientReady, (c) => {
   console.log(`[bot] logged in as ${c.user.tag}`);
   console.log(`[bot] WORK_DIR=${env.WORK_DIR}`);
-  await registerSlashCommands(env.DISCORD_APP_ID, env.DISCORD_GUILD_ID);
+  syncSlashCommands();
   startUptimeMonitor();
   startResourceMonitor();
   startExpiryMonitor();
@@ -49,6 +57,7 @@ client.once(Events.ClientReady, async (c) => {
   startWeeklySummary();
   startReminders();
   startEveningCheckin();
+  startCheckinInbox();
   startDailyLog();
   scheduleJpPush(c);
   startContentWorker(c);

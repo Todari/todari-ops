@@ -1,3 +1,4 @@
+import { inboxCapturePayload } from "../discord/inbox-capture.js";
 import { contentButton } from "../content/index.js";
 import { ChannelType, MessageFlags, type ButtonInteraction } from "discord.js";
 import { env } from "../env.js";
@@ -130,7 +131,7 @@ async function handleTilSave(
     await interaction.reply({ content: "⚠️ 인박스 채널 없음", flags: MessageFlags.Ephemeral });
     return;
   }
-  await channel.send(`📥 [til] (${pending.projectSlug}) ${pending.prompt}`.slice(0, 1900));
+  await channel.send(inboxCapturePayload(`📥 [til] (${pending.projectSlug}) ${pending.prompt}`));
   if (id) deletePendingAction(id);
   await interaction.update({ components: [] });
   await interaction.followUp({

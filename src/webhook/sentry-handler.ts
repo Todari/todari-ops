@@ -4,12 +4,11 @@ import {
   ButtonStyle,
   EmbedBuilder,
 } from "discord.js";
-import { randomUUID } from "node:crypto";
 import { env } from "../env.js";
 import { findProject, type ProjectConfig } from "../projects.js";
 // Node 22 has global fetch — no import needed.
 import { fetchAlertsChannel, ownerMention } from "../discord/alerts.js";
-import { shouldDrop } from "./dedup.js";
+import { markDelivered, wasDelivered } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
 import { runAutoDiagnosis } from "../agent/diagnose.js";
@@ -66,7 +65,7 @@ interface SentryPayload {
 // 웹훅이 모든 프로젝트에 발화하므로, 여기서 조용히 무시한다(Unrouteable 스팸 방지).
 const IGNORED_SENTRY_PROJECT_PREFIXES = ["forcletter-"];
 
-export async function handleSentryEvent(slug: string, payload: unknown): Promise<void> {
+export async function handleSentryEvent(slug: string, payload: unknown, nonce: string): Promise<void> {
   const p = (payload ?? {}) as SentryPayload;
   const issue = p.data?.issue;
   const event = p.data?.event;
@@ -94,44 +93,37 @@ export async function handleSentryEvent(slug: string, payload: unknown): Promise
     // Diagnostic fallback: dump issue keys + raw issue JSON snippet so we can
     // see what shape Sentry actually sends.
     const channel = await fetchAlertsChannel();
-    if (channel) {
-      try {
-        const issueKeys = issue ? Object.keys(issue).join(", ") : "(no issue)";
-        // Discord embed field value max = 1024. Keep JSON well under.
-        const cap = (s: string, n: number) =>
-          s.length > n ? s.slice(0, n - 4).replace(/[\uD800-\uDBFF]$/, "") + "…" : s;
-        const issueJson = cap(JSON.stringify(issue ?? null, null, 2), 900);
-        const issueTags = cap(JSON.stringify((issue as { tags?: unknown })?.tags ?? null), 900);
-        const issueMetadata = cap(
-          JSON.stringify((issue as { metadata?: unknown })?.metadata ?? null),
-          900,
-        );
-        const embed = new EmbedBuilder()
-          .setColor(0xfacc15)
-          .setTitle(`⚠️ Unrouteable Sentry alert (slug=${effectiveSlug})`)
-          .addFields(
-            { name: "url slug", value: slug, inline: true },
-            { name: "issue keys", value: "```" + cap(issueKeys, 900) + "```" },
-            { name: "issue.tags", value: "```" + issueTags + "```" },
-            { name: "issue.metadata", value: "```" + issueMetadata + "```" },
-            { name: "issue body (≤900)", value: "```json\n" + issueJson + "\n```" },
-          );
-        await channel.send({ embeds: [embed] });
-      } catch (err) {
-        console.error("[webhook] failed to post diag embed:", err);
-        await channel
-          .send(
-            `⚠️ Sentry payload arrived but couldn't render diag (slug=${effectiveSlug}): ` +
-              (err instanceof Error ? err.message : String(err)),
-          )
-          .catch(() => {});
-      }
+    if (!channel) throw new Error("Alerts channel unavailable");
+    let embed;
+    try {
+      const issueKeys = issue ? Object.keys(issue).join(", ") : "(no issue)";
+      const issueJson = truncate(JSON.stringify(issue ?? null, null, 2), 900);
+      const issueTags = truncate(JSON.stringify(issue?.tags ?? null), 900);
+      const issueMetadata = truncate(JSON.stringify((issue as { metadata?: unknown })?.metadata ?? null), 900);
+      embed = new EmbedBuilder()
+        .setColor(0xfacc15)
+        .setTitle(`⚠️ Unrouteable Sentry alert (slug=${effectiveSlug})`)
+        .addFields(
+          { name: "url slug", value: slug, inline: true },
+          { name: "issue keys", value: "```" + truncate(issueKeys, 900) + "```" },
+          { name: "issue.tags", value: "```" + issueTags + "```" },
+          { name: "issue.metadata", value: "```" + issueMetadata + "```" },
+          { name: "issue body (≤900)", value: "```json\n" + issueJson + "\n```" },
+        ).toJSON();
+    } catch {
+      await channel.send({
+        content: "⚠️ Sentry payload arrived with an unknown project slug.",
+        nonce,
+        enforceNonce: true,
+      });
+      return;
     }
+    await channel.send({ embeds: [embed], nonce, enforceNonce: true });
     return;
   }
 
-  const fingerprint = `${slug}:${issue?.id ?? event?.event_id ?? randomUUID()}`;
-  if (shouldDrop(fingerprint)) {
+  const fingerprint = `sentry:${slug}:${issue?.id ?? event?.event_id ?? nonce}`;
+  if (wasDelivered(fingerprint)) {
     console.log(`[webhook] deduped ${fingerprint}`);
     return;
   }
@@ -141,7 +133,7 @@ export async function handleSentryEvent(slug: string, payload: unknown): Promise
   const stackPreview = formatStack(event);
 
   const channel = await fetchAlertsChannel();
-  if (!channel) return;
+  if (!channel) throw new Error("Alerts channel unavailable");
 
   // Route the triage session by the *resolved* project (service tag may have
   // overridden the URL slug), not the raw URL slug.
@@ -149,11 +141,12 @@ export async function handleSentryEvent(slug: string, payload: unknown): Promise
     projectSlug: project.slug,
     threadName: `triage/${project.slug}/${issue?.id ?? event?.event_id?.slice(0, 8) ?? "evt"}`,
     prompt: buildTriagePrompt(project, issueTitle, stackPreview, issueUrl),
-  });
+  }, undefined, nonce);
 
   const embed = buildEmbed(project, issue, event, issueTitle, issueUrl);
   const components = buildButtons(id, issueUrl);
-  const alertMessage = await channel.send({ ...ownerMention(), embeds: [embed], components });
+  const alertMessage = await channel.send({ ...ownerMention(), embeds: [embed], components, nonce, enforceNonce: true });
+  markDelivered(fingerprint);
   recordEvent("sentry_alert", project.slug);
 
   runAutoDiagnosis({
@@ -236,7 +229,7 @@ async function fetchEventTagsFromSentry(
   try {
     const r = await fetch(
       `https://sentry.io/api/0/issues/${encodeURIComponent(issueId)}/events/latest/`,
-      { headers: { Authorization: `Bearer ${env.SENTRY_API_TOKEN}` } },
+      { headers: { Authorization: `Bearer ${env.SENTRY_API_TOKEN}` }, signal: AbortSignal.timeout(5_000) },
     );
     if (!r.ok) {
       console.warn(`[webhook] sentry api ${r.status} for issue ${issueId}`);

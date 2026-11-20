@@ -18,7 +18,7 @@ import {
   ddayLabel,
   getVaultState,
   todayKst,
-  vaultAgeHours,
+  vaultSyncSummary,
   type VaultState,
 } from "../vault/state.js";
 
@@ -134,11 +134,8 @@ export async function postDigest(): Promise<boolean> {
         ),
       });
     }
-    const age = vaultAgeHours(vault);
-    if (age > 36) {
-      embed.setFooter({ text: `⚠️ 볼트 데이터 ${Math.round(age)}시간 전 기준 — Mac 동기화 확인 필요` });
-    }
   }
+  embed.setFooter({ text: vaultSyncSummary(vault) });
 
   const quiet: string[] = [];
   for (const r of results) {

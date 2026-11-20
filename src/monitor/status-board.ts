@@ -7,6 +7,7 @@ import path from "node:path";
 import { fetchTextChannel } from "../discord/alerts.js";
 import { env } from "../env.js";
 import { readJsonObject, writeJsonObject } from "../storage/json-file.js";
+import { formatHostOperations } from "../vault/operations.js";
 import { getVaultState } from "../vault/state.js";
 import { getUptimeSnapshot } from "./uptime.js";
 
@@ -22,17 +23,24 @@ export function buildStatusBoard(instagram: string | null, now = Date.now()): Em
     const detail = entry.status === "down" || entry.status === "stale" ? ` (${entry.detail.slice(0, 80)})` : "";
     return `${ICON[entry.status]} ${target}${detail}`;
   });
-  const vaultSyncedAt = Date.parse(getVaultState()?.generatedAt ?? "");
+  const vault = getVaultState();
+  const vaultSyncedAt = Date.parse(vault?.generatedAt ?? "");
   const watch = [`워치독 확인 <t:${Math.floor(now / 1000)}:R>`];
-  if (!Number.isNaN(vaultSyncedAt)) {
+  if (Number.isFinite(vaultSyncedAt)) {
     // 맥 크론이 하루 세 번 보낸다. 하루 넘게 끊기면 다이제스트의 마감·할 일이 낡은 것이다.
     const stale = now - vaultSyncedAt > VAULT_STALE_MS ? "🟡 " : "";
-    watch.push(`${stale}볼트 동기화 <t:${Math.floor(vaultSyncedAt / 1000)}:R>`);
+    const revision = vault?.sourceRevision ? ` · ${vault.sourceRevision.slice(0, 8)}` : "";
+    watch.push(`${stale}볼트 동기화 <t:${Math.floor(vaultSyncedAt / 1000)}:R>${revision}`);
+  } else {
+    watch.push("⚪ 볼트 동기화 미수신");
   }
+  const edit = Date.parse(vault?.localMutationAt ?? "");
+  if (Number.isFinite(edit)) watch.push(`봇 할 일 반영 <t:${Math.floor(edit / 1000)}:R>`);
   const fields = [
     { name: "인스타 게시 (게시/예정)", value: instagram ?? "워치독 현황을 아직 받지 못했습니다." },
     { name: "서비스", value: services.join(" · ").slice(0, 1000) || "감시 대상 없음" },
     { name: "감시", value: watch.join(" · ") },
+    { name: "Mac 운영 원장", value: formatHostOperations(vault?.operations ?? [], now).slice(0, 1024) },
   ];
   const body = fields.map((field) => field.value).join("\n");
   return new EmbedBuilder()

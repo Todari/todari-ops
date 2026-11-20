@@ -14,11 +14,25 @@ case "$enabled" in
 esac
 if [[ "${1:-}" == deploy ]]; then
   shift
-  "${compose[@]}" build bot
-  if [[ "$enabled" == true || "$enabled" == 1 ]]; then
-    "${compose[@]}" run --rm --no-deps bot /opt/content-venv/bin/python3 /app/deploy/content_preflight.py
+  target=${1:-all}
+  [[ $# -le 1 ]] && [[ "$target" == all || "$target" == bot || "$target" == content-worker ]] || {
+    echo 'Usage: compose.sh deploy [bot|content-worker]' >&2; exit 2;
+  }
+  if [[ "$enabled" != true && "$enabled" != 1 ]]; then
+    [[ "$target" != content-worker ]] || { echo 'Content worker is disabled' >&2; exit 1; }
+    "${compose[@]}" -f docker-compose.content.yml stop content-worker
   fi
-  "${compose[@]}" up -d --wait --wait-timeout 180 "$@"
+  if [[ "$target" != content-worker ]]; then
+    "${compose[@]}" build bot
+    "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 bot
+    echo "Discord bot is ready"
+  fi
+  if [[ "$target" != bot && ( "$enabled" == true || "$enabled" == 1 ) ]]; then
+    [[ -f .env.content ]] || { echo ".env.content is required for the content worker" >&2; exit 1; }
+    "${compose[@]}" build content-worker
+    "${compose[@]}" run --rm --no-deps content-worker /opt/content-venv/bin/python3 /app/deploy/content_preflight.py
+    "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 content-worker
+  fi
 else
   "${compose[@]}" "$@"
 fi

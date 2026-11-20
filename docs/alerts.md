@@ -127,6 +127,9 @@
 
 - 워치독은 실행마다 봇에 생존 신호(`status: "heartbeat"`)를 보낸다. 봇의 `/healthz`는 이 신호가 30분 넘게 끊기면 `instagram-watchdog=stale`로 응답한다.
 - `.github/workflows/monitor.yml`이 30분마다 `/healthz`를 본다. 실패하면 배포 알림 웹훅으로 `@everyone` 멘션과 함께 알린다. 봇이 죽어도 이 경로는 살아 있다.
+- Mac mini에서 하네스의 `mac_bot_monitor.py`를 15분마다 실행하면 `/healthz` 장애·복구를 Discord 웹훅으로 직접 알리고 전송 실패를 다음 실행에서 재시도한다. 서명된 `POST /webhook/mac-monitor` 보고는 `/healthz.macProbe`의 마지막 점검 시각과 신선도로 확인한다. GitHub Actions는 Mac mini 보고 지연도 감시한다.
+- Mac mini는 기존 `gh` 인증으로 GitHub Actions `monitor.yml`의 마지막 예약 시작 시각을 확인한다. 90분 이상 예약 실행이 없을 때와 다시 실행될 때 각각 한 번 알린다. `/healthz.macProbe.githubMonitor`에서 시각과 신선도를 확인할 수 있으며, 미구성·조회 실패는 `unknown`이다.
+- 상태판의 볼트 동기화 시각과 커밋은 원격 Git HEAD를 확인하고 저장한 마지막 Mac 스냅샷을 나타낸다. 봇의 할 일 반영 시각과 Mac 호스트별 자동화 원장 상태도 각각 표시한다.
 
 ## 에이전트 세션과 예약 게시
 

@@ -1,4 +1,5 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, type Client, type Message, type ButtonInteraction, type ChatInputCommandInteraction } from "discord.js";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
@@ -17,7 +18,7 @@ export function publishReady(kind: Kind, account: string | null): boolean {
     account === process.env[`${prefix}_IG_USER_ID`] && !!process.env[`${prefix}_IG_ACCESS_TOKEN`] &&
     !!process.env.CONTENT_GRAPH_VERSION && !!process.env.CONTENT_S3_BUCKET;
 }
-const needsWorker = (job: Job): boolean => job.state === "queued" || job.state === "approved" || job.state === "revising" || job.state === "recovering"
+const needsWorker = (job: Job): boolean => !!job.execution || job.state === "queued" || job.state === "approved" || job.state === "revising" || job.state === "recovering"
   || ((job.state === "review" || job.state === "draft") && !job.message)
   || (["published", "failed", "uncertain"].includes(job.state) && job.message !== `notice:${job.state}`);
 
@@ -203,19 +204,31 @@ export function startContentWorker(client: Client): void {
           const send = (content: string) => channel.send({ content, allowedMentions: { parse: [] } });
           // 승인·재시도처럼 답을 기다리는 메시지는 소유자만 멘션해 푸시가 가게 한다(서버 알림 기본값이 "@멘션만").
           const ping = { mention: `<@${env.OWNER_DISCORD_ID}> `, allowedMentions: { users: [env.OWNER_DISCORD_ID] } };
-          if (job.state === "queued" || job.state === "approved" || job.state === "revising" || job.state === "recovering") {
-            const publishing = job.state === "approved";
-            const revising = job.state === "revising";
-            const recovering = job.state === "recovering";
-            if (publishing && !publishReady(job.kind, JSON.parse(readFileSync(join(jobs.path(job.id), "manifest.json"), "utf8")).account)) {
-              job.state = "review"; job.approvedHash = undefined; job.message = undefined; jobs.save(job);
-              continue;
+          if (job.execution || ["queued", "approved", "revising", "recovering"].includes(job.state)) {
+            const action = job.execution?.action ?? (job.state === "approved" ? "publish"
+              : job.state === "revising" ? "revise" : job.state === "recovering" ? "recover-revision" : "generate");
+            const publishing = action === "publish", revising = action === "revise", recovering = action === "recover-revision";
+            if (!job.execution) {
+              if (publishing && !publishReady(job.kind, JSON.parse(readFileSync(join(jobs.path(job.id), "manifest.json"), "utf8")).account)) {
+                job.state = "review"; job.approvedHash = undefined; job.message = undefined; jobs.save(job);
+                continue;
+              }
+              if (action === "generate") job.generationAttempts = (job.generationAttempts ?? 0) + 1;
+              job.error = undefined;
+              job.state = publishing ? "publishing" : revising ? "revising" : recovering ? "recovering" : "generating";
+              if (process.env.CONTENT_EXECUTOR === "worker") job.execution = { id: randomUUID(), action };
+              jobs.save(job);
             }
-            if (!publishing && !revising && !recovering) job.generationAttempts = (job.generationAttempts ?? 0) + 1;
-            job.error = undefined;
-            job.state = publishing ? "publishing" : revising ? "revising" : recovering ? "recovering" : "generating"; jobs.save(job);
             try {
-              await runWorker(job, publishing ? "publish" : revising ? "revise" : recovering ? "recover-revision" : "generate");
+              if (job.execution) {
+                const resultPath = join(jobs.path(job.id), "execution-result.json");
+                if (!existsSync(resultPath)) continue;
+                const result = JSON.parse(readFileSync(resultPath, "utf8"));
+                if (result.id !== job.execution.id) continue;
+                if (result.code !== 0) throw Object.assign(new Error("Content worker failed"), { code: result.code });
+              } else {
+                await runWorker(job, action);
+              }
               if (publishing) {
                 const receipt = JSON.parse(readFileSync(join(jobs.path(job.id), "receipt.json"), "utf8"));
                 job.mediaId = receipt.id; job.state = "published";
@@ -247,6 +260,7 @@ export function startContentWorker(client: Client): void {
                   : "생성·검수 실패. 서버 error.json을 확인한 뒤 수정 요청하세요.";
               }
             }
+            delete job.execution;
             jobs.save(job);
           }
           if ((job.state === "review" || job.state === "draft") && !job.message) {

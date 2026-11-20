@@ -7,6 +7,8 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
 import { normalizeTaskText } from "./editor.js";
+import { normalizeHostOperations, type HostOperations } from "./operations.js";
+import { getVaultRemoteRevision } from "./repo.js";
 
 export interface VaultTask {
   text: string;
@@ -24,7 +26,18 @@ export interface VaultNote {
 }
 
 export interface VaultState {
+  /** Last verified Mac snapshot. Legacy files cannot distinguish its time from a bot edit. */
+  generatedAt: string | null;
+  sourceRevision?: string;
+  localMutationAt?: string;
+  operations?: HostOperations[];
+  notes: VaultNote[];
+}
+
+interface VaultSnapshot {
   generatedAt: string;
+  sourceRevision: string;
+  operations?: HostOperations;
   notes: VaultNote[];
 }
 
@@ -32,13 +45,20 @@ const FILE = path.resolve(env.WORK_DIR, "..", "vault-state.json");
 
 let cached: VaultState | null = null;
 let loadedFromDisk = false;
+let pendingWrites: Promise<unknown> = Promise.resolve();
 
 export function getVaultState(): VaultState | null {
   if (!cached && !loadedFromDisk) {
     loadedFromDisk = true;
     try {
       if (existsSync(FILE)) {
-        cached = JSON.parse(readFileSync(FILE, "utf8")) as VaultState;
+        const state = JSON.parse(readFileSync(FILE, "utf8")) as VaultState | null;
+        if (state && Array.isArray(state.notes)) {
+          cached = {
+            ...state,
+            generatedAt: validRevision(state.sourceRevision) ? normalizeTimestamp(state.generatedAt) : null,
+          };
+        }
       }
     } catch (err) {
       console.warn("[vault-sync] failed to load state file:", err);
@@ -47,13 +67,36 @@ export function getVaultState(): VaultState | null {
   return cached;
 }
 
-export async function saveVaultState(state: VaultState): Promise<void> {
-  cached = state;
-  loadedFromDisk = true;
+function enqueueWrite<T>(write: () => Promise<T>): Promise<T> {
+  const result = pendingWrites.then(write);
+  pendingWrites = result.catch(() => undefined);
+  return result;
+}
+
+async function persist(state: VaultState): Promise<void> {
   await mkdir(path.dirname(FILE), { recursive: true });
   const tmp = FILE + ".tmp";
-  await writeFile(tmp, JSON.stringify(state, null, 2));
+  await writeFile(tmp, JSON.stringify(state, null, 2), { flush: true });
   await rename(tmp, FILE);
+  cached = state;
+  loadedFromDisk = true;
+}
+
+export function saveVaultSnapshot(snapshot: VaultSnapshot): Promise<"stored" | "stale" | "outdated-revision"> {
+  return enqueueWrite(async () => {
+    const current = getVaultState();
+    if (current?.generatedAt && snapshot.generatedAt <= current.generatedAt) return "stale";
+    if (snapshot.sourceRevision !== await getVaultRemoteRevision()) return "outdated-revision";
+
+    const { operations, ...state } = snapshot;
+    const hosts = current?.operations ?? [];
+    await persist({
+      ...state,
+      localMutationAt: current?.localMutationAt,
+      operations: operations ? [operations, ...hosts.filter((host) => host.hostname !== operations.hostname)].slice(0, 4) : hosts,
+    });
+    return "stored";
+  });
 }
 
 /** Reflect an EC2-side vault commit immediately, before the next Mac snapshot. */
@@ -64,25 +107,20 @@ export async function addCapturedVaultTask(
 ): Promise<void> {
   const text = normalizeTaskText(rawText).slice(0, 300);
   if (!text) return;
-  const current = getVaultState() ?? { generatedAt: new Date().toISOString(), notes: [] };
-  const notes = current.notes.map((entry) => ({
-    ...entry,
-    tasks: [...entry.tasks],
-    deadlines: [...entry.deadlines],
-  }));
-  let target = notes.find((entry) => entry.slug === slug || entry.note === note);
-  if (!target) {
-    target = { note, slug, tasks: [], deadlines: [] };
-    notes.push(target);
-  }
-  if (!target.tasks.some((task) => task.text === text)) {
+  await enqueueWrite(async () => {
+    const current = getVaultState() ?? { generatedAt: null, notes: [] };
+    const notes = [...current.notes];
+    const index = notes.findIndex((entry) => entry.slug === slug || entry.note === note);
+    const target = notes[index] ?? { note, slug, tasks: [], deadlines: [] };
+    if (target.tasks.some((task) => task.text === text)) return;
     const dueMatch = rawText.match(/📅\s*(\d{4}-\d{2}-\d{2})/);
-    target.tasks.unshift({
+    const task = {
       text,
       ...(dueMatch?.[1] ? { due: dueMatch[1] } : {}),
-    });
-  }
-  await saveVaultState({ generatedAt: new Date().toISOString(), notes });
+    };
+    notes[index < 0 ? notes.length : index] = { ...target, tasks: [task, ...target.tasks] };
+    await persist({ ...current, localMutationAt: new Date().toISOString(), notes });
+  });
 }
 
 export async function completeCapturedVaultTask(
@@ -103,7 +141,7 @@ export async function setCapturedVaultTaskDue(
 ): Promise<void> {
   const text = normalizeTaskText(rawText);
   await rewriteCapturedTasks(note, slug, (tasks) =>
-    tasks.map((task) => (task.text === text ? { ...task, due } : task)),
+    tasks.map((task) => (task.text === text && task.due !== due ? { ...task, due } : task)),
   );
 }
 
@@ -112,22 +150,30 @@ async function rewriteCapturedTasks(
   slug: string,
   rewrite: (tasks: VaultTask[]) => VaultTask[],
 ): Promise<void> {
-  const state = getVaultState();
-  if (!state) return;
-  const notes = state.notes.map((entry) => {
-    if (entry.slug !== slug && entry.note !== note) return entry;
-    return { ...entry, tasks: rewrite(entry.tasks) };
+  await enqueueWrite(async () => {
+    const state = getVaultState();
+    if (!state) return;
+    const notes = state.notes.map((entry) => {
+      if (entry.slug !== slug && entry.note !== note) return entry;
+      const tasks = rewrite(entry.tasks);
+      if (tasks.length === entry.tasks.length && tasks.every((task, index) => task === entry.tasks[index])) return entry;
+      return { ...entry, tasks };
+    });
+    if (notes.every((note, index) => note === state.notes[index])) return;
+    await persist({ ...state, localMutationAt: new Date().toISOString(), notes });
   });
-  await saveVaultState({ generatedAt: new Date().toISOString(), notes });
 }
 
 /** Bound + strip an incoming payload so a bad sync can't blow up embeds. */
-export function normalizeVaultState(raw: unknown): VaultState | null {
-  const r = raw as Partial<VaultState> | null;
-  if (!r || typeof r.generatedAt !== "string" || !Array.isArray(r.notes)) return null;
-  const clip = (s: unknown, n: number) => String(s ?? "").slice(0, n).trim();
+export function normalizeVaultState(raw: unknown): VaultSnapshot | null {
+  const r = raw as Partial<VaultSnapshot> | null;
+  if (!r || !validRevision(r.sourceRevision) || !Array.isArray(r.notes)) return null;
+  const generatedAt = normalizeTimestamp(r.generatedAt);
+  if (!generatedAt || Date.parse(generatedAt) > Date.now() + 5 * 60_000) return null;
+  const clip = (s: unknown, n: number) => typeof s === "string" ? s.slice(0, n).trim() : "";
   const notes: VaultNote[] = [];
   for (const n of r.notes.slice(0, 50)) {
+    if (!n || typeof n !== "object") continue;
     const note = clip((n as VaultNote).note, 80);
     if (!note) continue;
     const slugRaw = clip((n as VaultNote).slug, 80);
@@ -135,20 +181,37 @@ export function normalizeVaultState(raw: unknown): VaultState | null {
       .slice(0, 50)
       .map((t) => ({
         text: clip(t?.text, 300),
-        ...(isIsoDate(String(t?.due ?? "")) ? { due: String(t!.due) } : {}),
+        ...(isIsoDate(t?.due) ? { due: t.due } : {}),
       }))
       .filter((t) => t.text);
     const deadlines = (Array.isArray((n as VaultNote).deadlines) ? (n as VaultNote).deadlines : [])
       .slice(0, 30)
-      .map((d) => ({ text: clip(d?.text, 300), date: String(d?.date ?? "") }))
-      .filter((d) => d.text && isIsoDate(d.date));
+      .flatMap((d) => {
+        const text = clip(d?.text, 300);
+        return text && isIsoDate(d?.date) ? [{ text, date: d.date }] : [];
+      });
     notes.push({ note, ...(slugRaw ? { slug: slugRaw } : {}), tasks, deadlines });
   }
-  return { generatedAt: r.generatedAt, notes };
+  return {
+    generatedAt, sourceRevision: r.sourceRevision, notes,
+    operations: normalizeHostOperations(r.operations, generatedAt),
+  };
 }
 
-function isIsoDate(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+function validRevision(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value);
+}
+
+function normalizeTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return null;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return null;
+  const canonical = new Date(time).toISOString();
+  return canonical === value || canonical.replace(".000Z", "Z") === value ? canonical : null;
+}
+
+function isIsoDate(s: unknown): s is string {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
 /** Today in KST (fixed UTC+9, no DST) as YYYY-MM-DD. */
@@ -200,8 +263,17 @@ export function collectDeadlines(
     .sort((a, b) => a.d - b.d);
 }
 
-export function vaultAgeHours(state: VaultState): number {
-  const t = Date.parse(state.generatedAt);
-  if (Number.isNaN(t)) return Infinity;
-  return (Date.now() - t) / 3600_000;
+export function vaultAgeHours(state: VaultState | null): number | null {
+  const t = Date.parse(state?.generatedAt ?? "");
+  return Number.isFinite(t) ? Math.max(0, (Date.now() - t) / 3600_000) : null;
+}
+
+export function vaultSyncSummary(state: VaultState | null): string {
+  const age = vaultAgeHours(state);
+  const revision = state?.sourceRevision ? ` · ${state.sourceRevision.slice(0, 8)}` : "";
+  const snapshot = age === null
+    ? "⚪ 볼트 동기화 미수신"
+    : `${age > 36 ? "⚠️ " : ""}볼트 동기화 ${Math.round(age)}시간 전${revision}`;
+  const edit = Date.parse(state?.localMutationAt ?? "");
+  return Number.isFinite(edit) ? `${snapshot} · 봇 할 일 반영 ${Math.round(Math.max(0, Date.now() - edit) / 3600_000)}시간 전` : snapshot;
 }

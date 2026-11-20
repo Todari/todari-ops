@@ -2,7 +2,7 @@ import { MessageFlags } from "discord.js";
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterAll, expect, it, vi } from "vitest";
-import { getInstagramBrief, readInstagramBrief, saveInstagramBrief, updateStatusBoard } from "./status-board.js";
+import { buildStatusBoard, getInstagramBrief, readInstagramBrief, saveInstagramBrief, updateStatusBoard } from "./status-board.js";
 
 const mocks = vi.hoisted(() => ({
   env: {
@@ -12,14 +12,21 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(async (_message: any) => ({ id: "board-1" })),
   edit: vi.fn(async (_id: string, _message: any) => ({})),
   uptime: [] as Array<Record<string, unknown>>,
-  vaultAt: new Date().toISOString(),
+  vaultAt: new Date().toISOString() as string | null,
+  localMutationAt: undefined as string | undefined,
+  operations: [] as unknown[],
 }));
 vi.mock("../env.js", () => ({ env: mocks.env }));
 vi.mock("../discord/alerts.js", () => ({
   fetchTextChannel: async () => ({ send: mocks.send, messages: { edit: mocks.edit } }),
 }));
 vi.mock("../vault/state.js", () => ({
-  getVaultState: () => ({ generatedAt: mocks.vaultAt, notes: [] }),
+  getVaultState: () => ({
+    generatedAt: mocks.vaultAt,
+    localMutationAt: mocks.localMutationAt,
+    operations: mocks.operations,
+    notes: [],
+  }),
 }));
 vi.mock("./uptime.js", () => ({ getUptimeSnapshot: () => mocks.uptime }));
 afterAll(() => rmSync(dirname(mocks.env.WORK_DIR), { recursive: true, force: true }));
@@ -35,7 +42,8 @@ it("posts the board once, then rewrites that message, and reposts only when it w
     fields: [
       { value: "🟢 **섹터4** 오늘 1/1 · 어제 1/1" },
       { value: "🟢 todari" },
-      { value: expect.stringContaining(`볼트 동기화 <t:${Math.floor(Date.parse(mocks.vaultAt) / 1000)}:R>`) },
+      { value: expect.stringContaining(`볼트 동기화 <t:${Math.floor(Date.parse(mocks.vaultAt!) / 1000)}:R>`) },
+      { value: "⚪ Mac 운영 원장 미수신" },
     ],
   });
 
@@ -44,7 +52,7 @@ it("posts the board once, then rewrites that message, and reposts only when it w
   await updateStatusBoard("🟢 **섹터4** 오늘 1/1 · 어제 1/1");
   expect(mocks.edit.mock.calls[0]![1].embeds[0].toJSON()).toMatchObject({
     color: 0xfee75c,
-    fields: [{}, {}, { value: expect.stringContaining("🟡 볼트 동기화 <t:") }],
+    fields: [{}, {}, { value: expect.stringContaining("🟡 볼트 동기화 <t:") }, {}],
   });
   mocks.edit.mockClear();
 
@@ -54,7 +62,7 @@ it("posts the board once, then rewrites that message, and reposts only when it w
   expect(mocks.edit.mock.calls[0]![0]).toBe("board-1");
   expect(mocks.edit.mock.calls[0]![1].embeds[0].toJSON()).toMatchObject({
     color: 0xed4245,
-    fields: [{ value: "워치독 현황을 아직 받지 못했습니다." }, { value: "🔴 lvti/api (HTTP 502)" }, {}],
+    fields: [{ value: "워치독 현황을 아직 받지 못했습니다." }, { value: "🔴 lvti/api (HTTP 502)" }, {}, {}],
   });
 
   // 일시 오류에는 새로 올리지 않는다(상태판이 둘이 되지 않게).
@@ -65,6 +73,24 @@ it("posts the board once, then rewrites that message, and reposts only when it w
   mocks.edit.mockRejectedValueOnce(Object.assign(new Error("Unknown Message"), { code: 10008 }));
   await updateStatusBoard(null);
   expect(mocks.send).toHaveBeenCalledTimes(2);
+});
+
+it("shows bot edits separately from missing Mac sync and separates host evidence", () => {
+  const now = Date.parse("2026-01-03T00:00:00Z");
+  mocks.vaultAt = null;
+  mocks.localMutationAt = new Date(now).toISOString();
+  mocks.operations = [
+    { hostname: "laptop", observedAt: "2026-01-01T00:00:00Z", jobs: [{ job: "vault-push", status: "failed", exit_code: 7 }] },
+    { hostname: "mini", observedAt: new Date(now).toISOString(), jobs: [] },
+  ];
+  const fields = buildStatusBoard(null, now).toJSON().fields!;
+  expect(fields[2]?.value).toContain("볼트 동기화 미수신");
+  expect(fields[2]?.value).toContain("봇 할 일 반영");
+  expect(fields[3]?.value).toContain("vault-sync 🟡 수신 지연");
+  expect(fields[3]?.value).toContain("vault-push 🔴 실패 (7)");
+  expect(fields[3]?.value).toContain("**mini**");
+  expect(fields[3]?.value).toContain("vault-sync 🟢 수신");
+  expect(fields[3]?.value).toContain("vault-push ⚪ 미확인");
 });
 
 it("keeps the watchdog brief for the morning digest and flags it once the watchdog went quiet", () => {

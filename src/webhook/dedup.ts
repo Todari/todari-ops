@@ -1,15 +1,15 @@
-// Tiny in-memory dedup: same fingerprint within TTL → drop. v1.
-// Stage 3 will move this to Postgres if alert volume grows.
+// Collapse related alerts for five minutes after a successful Discord post.
 
 const seen = new Map<string, number>();
 const TTL_MS = 5 * 60 * 1000;
 
-export function shouldDrop(fingerprint: string, now = Date.now()): boolean {
+export function wasDelivered(fingerprint: string, now = Date.now()): boolean {
   pruneExpired(now);
-  const last = seen.get(fingerprint);
-  if (last !== undefined && now - last < TTL_MS) return true;
+  return seen.has(fingerprint);
+}
+
+export function markDelivered(fingerprint: string, now = Date.now()): void {
   seen.set(fingerprint, now);
-  return false;
 }
 
 function pruneExpired(now: number): void {

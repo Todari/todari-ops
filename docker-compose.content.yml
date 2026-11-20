@@ -1,16 +1,31 @@
-# Selected by deploy/compose.sh from persisted .env.production / .env.content configuration.
 services:
   bot:
-    build:
-      dockerfile: Dockerfile.content
     env_file:
-      - .env.content
+      - path: .env.content
+        required: false
     environment:
       CONTENT_ENABLED: "true"
+      CONTENT_EXECUTOR: worker
+
+  content-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.content
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env.content
+        required: false
+    environment:
+      WORK_DIR: /data/work
       WAENYAMYEON_ROOT: /data/content-repos/waenyamyeon
       INSTATOON_ROOT: /data/content-repos/instatoon-studio
     volumes:
-      # A Linux checkout with Linux npm ci dependencies. Never mount macOS node_modules.
+      - type: volume
+        source: bot_workdata
+        target: /data/work/content
+        volume:
+          subpath: work/content
       - type: bind
         source: ${CONTENT_REPOS_DIR:-/home/ubuntu/content-repos}
         target: /data/content-repos
@@ -19,3 +34,8 @@ services:
     shm_size: 1gb
     cpus: 1.0
     mem_limit: 1800m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

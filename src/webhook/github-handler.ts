@@ -1,7 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } from "discord.js";
 import { findProjectByRepoFullName, type ProjectConfig } from "../projects.js";
 import { fetchAlertsChannel, fetchDeployLogChannel, ownerMention } from "../discord/alerts.js";
-import { shouldDrop } from "./dedup.js";
+import { markDelivered, wasDelivered } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
 import { runAutoDiagnosis } from "../agent/diagnose.js";
@@ -43,7 +43,7 @@ interface GithubPayload {
   workflow_run?: GithubWorkflowRun;
 }
 
-export async function handleGithubEvent(eventName: string, payload: unknown): Promise<void> {
+export async function handleGithubEvent(eventName: string, payload: unknown, nonce: string): Promise<void> {
   const p = (payload ?? {}) as GithubPayload;
   const fullName = p.repository?.full_name;
   if (eventName === "ping") {
@@ -58,11 +58,11 @@ export async function handleGithubEvent(eventName: string, payload: unknown): Pr
   }
 
   if (eventName === "pull_request" && p.pull_request) {
-    await handlePullRequest(project, fullName, p.action ?? "", p.pull_request);
+    await handlePullRequest(project, fullName, p.action ?? "", p.pull_request, nonce);
     return;
   }
   if (eventName === "workflow_run" && p.workflow_run) {
-    await handleWorkflowRun(project, fullName, p.action ?? "", p.workflow_run);
+    await handleWorkflowRun(project, fullName, p.action ?? "", p.workflow_run, nonce);
     return;
   }
 }
@@ -72,31 +72,34 @@ async function handlePullRequest(
   fullName: string,
   action: string,
   pr: GithubPullRequest,
+  nonce: string,
 ): Promise<void> {
   // 머지되면 초록 확인 알림 (closed + merged), 열리면 리뷰 알림.
   if (action === "closed") {
     if (!pr.merged) return;
-    if (shouldDrop(`gh:pr-merged:${fullName}:${pr.number}`)) return;
-    recordEvent("pr_merged", project.slug);
+    const fingerprint = `gh:pr-merged:${fullName}:${pr.number}`;
+    if (wasDelivered(fingerprint)) return;
     // 머지 확인은 조치가 필요 없는 기록이라 로그 채널에 무음으로 남긴다.
     const channel = await fetchDeployLogChannel();
-    if (!channel) return;
+    if (!channel) throw new Error("Deploy log channel unavailable");
     const embed = new EmbedBuilder()
       .setColor(0x22c55e)
       .setTitle(`🟢 [${project.name}] PR #${pr.number} 머지됨 — ${truncate(pr.title ?? "", 180)}`)
       .setFooter({ text: project.slug });
     if (pr.html_url) embed.setURL(pr.html_url);
-    await channel.send({ embeds: [embed], flags: MessageFlags.SuppressNotifications });
+    await channel.send({ embeds: [embed], flags: MessageFlags.SuppressNotifications, nonce, enforceNonce: true });
+    markDelivered(fingerprint);
+    recordEvent("pr_merged", project.slug);
     return;
   }
 
   const interesting = action === "opened" || action === "ready_for_review" || action === "reopened";
   if (!interesting || pr.draft) return;
-  if (shouldDrop(`gh:pr:${fullName}:${pr.number}:${action}`)) return;
-  recordEvent("pr_opened", project.slug);
+  const fingerprint = `gh:pr:${fullName}:${pr.number}:${action}`;
+  if (wasDelivered(fingerprint)) return;
 
   const channel = await fetchAlertsChannel();
-  if (!channel) return;
+  if (!channel) throw new Error("Alerts channel unavailable");
 
   const base = pr.base?.ref ?? "?";
   const head = pr.head?.ref ?? "?";
@@ -121,7 +124,7 @@ async function handlePullRequest(
     projectSlug: project.slug,
     threadName: `review/${project.slug}/pr-${pr.number}`,
     prompt,
-  });
+  }, undefined, nonce);
 
   const embed = new EmbedBuilder()
     .setColor(0x3b82f6)
@@ -153,7 +156,9 @@ async function handlePullRequest(
   // 내가 연 PR과 봇 PR에는 푸시가 필요 없다. 다른 사람이 리뷰를 기다릴 때만 멘션한다.
   const author = pr.user?.login ?? "";
   const awaitsOwner = author !== "" && author !== fullName.split("/")[0] && !author.endsWith("[bot]");
-  await channel.send({ ...(awaitsOwner ? ownerMention() : {}), embeds: [embed], components: [row] });
+  await channel.send({ ...(awaitsOwner ? ownerMention() : {}), embeds: [embed], components: [row], nonce, enforceNonce: true });
+  markDelivered(fingerprint);
+  recordEvent("pr_opened", project.slug);
 }
 
 async function handleWorkflowRun(
@@ -161,13 +166,14 @@ async function handleWorkflowRun(
   fullName: string,
   action: string,
   run: GithubWorkflowRun,
+  nonce: string,
 ): Promise<void> {
   if (action !== "completed" || run.conclusion !== "failure") return;
-  if (shouldDrop(`gh:run:${fullName}:${run.id}:${run.run_attempt ?? 1}`)) return;
-  recordEvent("ci_fail", project.slug);
+  const fingerprint = `gh:run:${fullName}:${run.id}:${run.run_attempt ?? 1}`;
+  if (wasDelivered(fingerprint)) return;
 
   const channel = await fetchAlertsChannel();
-  if (!channel) return;
+  if (!channel) throw new Error("Alerts channel unavailable");
 
   const prompt = [
     "[CI 실패 트리아지]",
@@ -186,7 +192,7 @@ async function handleWorkflowRun(
     projectSlug: project.slug,
     threadName: `ci-fail/${project.slug}/${run.id ?? "run"}`,
     prompt,
-  });
+  }, undefined, nonce);
 
   const embed = new EmbedBuilder()
     .setColor(0xf97316)
@@ -210,7 +216,9 @@ async function handleWorkflowRun(
       new ButtonBuilder().setLabel("Open run").setStyle(ButtonStyle.Link).setURL(run.html_url),
     );
   }
-  const alertMessage = await channel.send({ ...ownerMention(), embeds: [embed], components: [row] });
+  const alertMessage = await channel.send({ ...ownerMention(), embeds: [embed], components: [row], nonce, enforceNonce: true });
+  markDelivered(fingerprint);
+  recordEvent("ci_fail", project.slug);
 
   runAutoDiagnosis({
     project,

@@ -1,3 +1,4 @@
+import { inboxCapturePayload } from "../discord/inbox-capture.js";
 import { fetchInboxChannel } from "../discord/alerts.js";
 import { captureException } from "../observability/sentry.js";
 import {
@@ -23,7 +24,17 @@ export async function captureToVault(
     const result = await applyVaultCapture(kind, projectSlug, text);
     if (kind === "task") {
       const slug = projectSlug || "todari-ops";
-      await addCapturedVaultTask(noteNameForProject(slug), slug, text);
+      try {
+        await addCapturedVaultTask(noteNameForProject(slug), slug, text);
+      } catch (stateError) {
+        // The vault commit already succeeded. A derived snapshot failure must
+        // not requeue the source mutation and apply it a second time.
+        captureException(stateError, {
+          kind: "vault-capture-state-failed",
+          captureKind: kind,
+          projectSlug,
+        });
+      }
     }
     return { mode: "written", result };
   } catch (err) {
@@ -33,9 +44,7 @@ export async function captureToVault(
       if (!channel) {
         return { mode: "failed", error: errorMessage(err) };
       }
-      await channel.send(
-        `📥 [${kind}]${projectSlug ? ` (${projectSlug})` : ""} ${text}`.slice(0, 1900),
-      );
+      await channel.send(inboxCapturePayload(`📥 [${kind}]${projectSlug ? ` (${projectSlug})` : ""} ${text}`));
       return { mode: "queued", error: errorMessage(err) };
     } catch (queueError) {
       captureException(queueError, {

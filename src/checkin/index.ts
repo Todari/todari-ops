@@ -11,14 +11,13 @@ import {
 } from "discord.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../env.js";
 import { activeProjects, clip, collectActivity, renderSections, within } from "../daily-log/evidence.js";
 import { fetchDigestChannel, ownerMention } from "../discord/alerts.js";
 import { addDays, getVaultState, todayKst, type VaultState } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
-import { readJsonObject, writeJsonObject } from "../storage/json-file.js";
+import { readJsonObject, writeJsonFile, writeJsonObject } from "../storage/json-file.js";
 import { claimTodayKst, missedTodayKst } from "../storage/scheduled-posts.js";
 import { withoutSnoozed } from "../task-loop/tidy.js";
 import { activeFirst, todayDoneRows, todayPicksField } from "../task-loop/today.js";
@@ -238,10 +237,7 @@ export async function saveTomorrowFirstTask(
   task?: TaskRef,
 ): Promise<void> {
   const state: CheckinState = { date, tomorrow, ...(task ? { task } : {}) };
-  await mkdir(path.dirname(FILE), { recursive: true });
-  const tmp = FILE + ".tmp";
-  await writeFile(tmp, JSON.stringify(state, null, 2));
-  await rename(tmp, FILE);
+  writeJsonFile(FILE, state);
 }
 
 function readState(): CheckinState | null {

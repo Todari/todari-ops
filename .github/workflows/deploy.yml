@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      target:
+        description: 배포할 서비스
+        type: choice
+        default: all
+        options:
+          - all
+          - bot
+          - content-worker
 
 permissions:
   contents: read
@@ -72,10 +81,12 @@ jobs:
             -e "ssh -i ~/.ssh/id_deploy" \
             ./ "$EC2_HOST:~/todari-ops/"
 
-      - name: Build and restart containers
+      - name: Build and restart selected services
+        env:
+          TARGET: ${{ inputs.target || 'all' }}
         run: |
-          ssh -i ~/.ssh/id_deploy "$EC2_HOST" \
-            'cd ~/todari-ops && bash deploy/compose.sh deploy'
+          case "$TARGET" in all|bot|content-worker) ;; *) exit 2 ;; esac
+          ssh -i ~/.ssh/id_deploy "$EC2_HOST" "cd ~/todari-ops && bash deploy/compose.sh deploy $TARGET"
 
   notify:
     needs: [typecheck, deploy]
@@ -87,15 +98,16 @@ jobs:
           WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
           TC: ${{ needs.typecheck.result }}
           DP: ${{ needs.deploy.result }}
+          TARGET: ${{ inputs.target || 'all' }}
         run: |
           [ -z "$WEBHOOK" ] && { echo "no webhook secret; skip"; exit 0; }
           RUN="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           if [ "$DP" = "success" ]; then
-            MSG="✅ todari-ops 배포 성공 (\`${GITHUB_SHA:0:7}\`)"
+            MSG="✅ todari-ops $TARGET 배포 성공 (\`${GITHUB_SHA:0:7}\`)"
           elif [ "$TC" != "success" ]; then
             MSG="🔴 todari-ops 배포 실패 — 검증(typecheck/test/build) ($TC). $RUN"
           else
-            MSG="🔴 todari-ops 배포 실패 — deploy ($DP). $RUN"
+            MSG="🔴 todari-ops $TARGET 배포 중단 ($DP). 단계별 기동 결과 확인: $RUN"
           fi
           curl -sS -H "Content-Type: application/json" \
             -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$WEBHOOK" >/dev/null || true

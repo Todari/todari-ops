@@ -23,7 +23,7 @@ import {
   collectDeadlines,
   ddayLabel,
   getVaultState,
-  vaultAgeHours,
+  vaultSyncSummary,
 } from "../vault/state.js";
 import { captureException } from "../observability/sentry.js";
 import { captureOutcomeText, captureToVault } from "../vault/capture.js";
@@ -429,7 +429,7 @@ function buildStatusText(): string {
 
   const vault = getVaultState();
   if (!vault) {
-    lines.push("", "**볼트**", "동기화 데이터 없음");
+    lines.push("", "**볼트**", vaultSyncSummary(vault));
     return lines.join("\n");
   }
 
@@ -449,7 +449,7 @@ function buildStatusText(): string {
     .map((note) => `${note.note} ${note.tasks.length}`)
     .join(" · ");
   if (taskCounts) lines.push("", `**열린 할 일**\n${taskCounts}`);
-  lines.push("", `볼트 동기화 ${Math.round(vaultAgeHours(vault))}시간 전`);
+  lines.push("", vaultSyncSummary(vault));
   return lines.join("\n");
 }
 

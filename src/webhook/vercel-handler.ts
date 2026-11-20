@@ -6,12 +6,15 @@ import {
   type Message,
   MessageFlags,
 } from "discord.js";
+import path from "node:path";
+import { env } from "../env.js";
 import { findProjectByLooseName, type ProjectConfig } from "../projects.js";
 import { probe } from "../monitor/uptime.js";
 import { fetchAlertsChannel, fetchDeployLogChannel, ownerMention } from "../discord/alerts.js";
-import { shouldDrop } from "./dedup.js";
+import { markDelivered, wasDelivered } from "./dedup.js";
 import { putPendingAction } from "./pending.js";
 import { recordEvent } from "../stats/events.js";
+import { readJsonFile, writeJsonFile } from "../storage/json-file.js";
 
 // Vercel account/team-level webhook. Alerts on deployment.error;
 // posts a green "recovered" note on the first successful
@@ -34,14 +37,28 @@ interface VercelPayload {
 }
 
 // Last deploy outcome per vercel project name — drives the recovery message.
-const lastFailed = new Set<string>();
+const FAILURE_FILE = path.resolve(env.WORK_DIR, "..", "vercel-failures.json");
+const posted = new Set<string>();
 
-export async function handleVercelEvent(payload: unknown): Promise<void> {
-  const p = (payload ?? {}) as VercelPayload;
-  const type = p.type ?? "";
-  const name = p.payload?.name ?? "?";
+export interface VercelDelivery {
+  type: "deployment.error" | "deployment.succeeded";
+  projectName: string;
+  deploymentId?: string;
+}
+
+export function vercelDelivery(payload: unknown): VercelDelivery | undefined {
+  const p = payload as VercelPayload | null;
+  const type = p?.type;
+  if (type !== "deployment.error" && type !== "deployment.succeeded") return;
+  return { type, projectName: p?.payload?.name ?? "?", deploymentId: p?.payload?.deployment?.id ?? p?.payload?.url };
+}
+
+export async function handleVercelEvent(payload: unknown, nonce: string): Promise<void> {
+  const event = vercelDelivery(payload);
+  if (!event) return;
+  const p = payload as VercelPayload;
+  const { type, projectName: name, deploymentId } = event;
   const target = p.payload?.target ?? "preview";
-  const deployId = p.payload?.deployment?.id ?? p.payload?.url ?? "dep";
   const inspectUrl = p.payload?.links?.deployment;
   const commitMsg = p.payload?.deployment?.meta?.githubCommitMessage?.split("\n")[0];
   const branch = p.payload?.deployment?.meta?.githubCommitRef;
@@ -49,22 +66,35 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
   // deployment.canceled는 실패가 아니다 — Ignored Build Step이 건너뛴 브랜치(output/cards의
   // 스네이크·카드 자동 푸시)와 새 커밋에 밀려 취소된 빌드가 이 이벤트로 도착한다.
   // 실제 빌드 실패는 deployment.error로만 온다.
-  const failed = type === "deployment.error";
   const succeeded = type === "deployment.succeeded";
-  if (!failed && !succeeded) return;
-  // Preview 배포는 실패만 알림, 성공은 프로덕션 복구 알림에만 사용.
-  if (shouldDrop(`vercel:${type}:${deployId}`)) return;
+  const fingerprint = `vercel:${type}:${deploymentId ?? nonce}`;
+  if (wasDelivered(fingerprint)) return;
 
   const project = findProjectByLooseName(name);
+  const failures = readJsonFile(FAILURE_FILE, []);
+  if (!Array.isArray(failures)) throw new Error("Invalid Vercel failure state");
+  const lastFailed = new Set<string>(failures);
+  const finish = () => {
+    const changed = succeeded ? lastFailed.delete(name) : !lastFailed.has(name);
+    if (!succeeded) lastFailed.add(name);
+    if (changed) writeJsonFile(FAILURE_FILE, [...lastFailed]);
+    posted.delete(nonce);
+    markDelivered(fingerprint);
+    if (!succeeded) recordEvent("vercel_fail", project?.slug ?? name);
+    if (succeeded && target === "production") recordEvent("vercel_deploy", project?.slug ?? name);
+  };
+
+  if (posted.has(nonce)) {
+    finish();
+    return;
+  }
 
   if (succeeded) {
-    if (target === "production") recordEvent("vercel_deploy", project?.slug ?? name);
     const wasFailed = lastFailed.has(name);
-    lastFailed.delete(name);
     // 복구는 조치 채널에 알리고, 평상시 프로덕션 성공은 배포 로그에 컴팩트 초록 한 줄로 남긴다.
     if (!wasFailed && target !== "production") return;
     const channel = wasFailed ? await fetchAlertsChannel() : await fetchDeployLogChannel();
-    if (!channel) return;
+    if (!channel) throw new Error("Vercel delivery channel unavailable");
     const embed = new EmbedBuilder()
       .setColor(0x22c55e)
       .setTitle(
@@ -74,18 +104,18 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
       )
       .setDescription(commitMsg ? `\`${branch ?? "?"}\` ${commitMsg}` : null);
     if (inspectUrl) embed.setURL(inspectUrl);
-    const sent = await channel.send({ embeds: [embed], flags: MessageFlags.SuppressNotifications });
+    const sent = await channel.send({ embeds: [embed], flags: MessageFlags.SuppressNotifications, nonce, enforceNonce: true });
+    posted.add(nonce);
     // 배포 후 스모크 체크: Vercel 말만 믿지 않고 실제 프로덕션 URL 확인.
     if (target === "production" && project?.healthUrl) {
-      void smokeCheck(sent, project.healthUrl);
+      void smokeCheck(sent, project.healthUrl).catch((err) => console.warn("[vercel] smoke check failed:", err));
     }
+    finish();
     return;
   }
 
-  lastFailed.add(name);
-  recordEvent("vercel_fail", project?.slug ?? name);
   const channel = await fetchAlertsChannel();
-  if (!channel) return;
+  if (!channel) throw new Error("Alerts channel unavailable");
 
   const embed = new EmbedBuilder()
     .setColor(0xef4444)
@@ -102,9 +132,9 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
   if (project) {
     const id = putPendingAction({
       projectSlug: project.slug,
-      threadName: `deploy-fail/${project.slug}/${String(deployId).slice(-8)}`,
+      threadName: `deploy-fail/${project.slug}/${(deploymentId ?? nonce).slice(-8)}`,
       prompt: buildDeployFailPrompt(project, type, branch, commitMsg, inspectUrl),
-    });
+    }, undefined, nonce);
     row.addComponents(
       new ButtonBuilder()
         .setCustomId(`triage:start:${id}`)
@@ -122,7 +152,11 @@ export async function handleVercelEvent(payload: unknown): Promise<void> {
     ...ownerMention(),
     embeds: [embed],
     components: row.components.length > 0 ? [row] : [],
+    nonce,
+    enforceNonce: true,
   });
+  posted.add(nonce);
+  finish();
 }
 
 function buildDeployFailPrompt(

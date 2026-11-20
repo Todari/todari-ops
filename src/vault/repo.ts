@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { env } from "../env.js";
-import { ensureCheckout, pullLatest } from "../workspaces/checkout.js";
+import { ensureCheckout, githubAuthEnv, pullLatest } from "../workspaces/checkout.js";
 import type { ProjectConfig } from "../projects.js";
 
 // 옵시디언 볼트(지식베이스) 전용 checkout. 코드가 아니라 지식이므로
@@ -23,4 +25,19 @@ export async function ensureVaultCheckout(): Promise<string> {
   const dir = await ensureCheckout("vault", VAULT_PROJECT, VAULT_CLONE_TIMEOUT_MS);
   await pullLatest(dir, VAULT_GIT_TIMEOUT_MS); // Mac과 봇 양쪽에서 바뀌므로 매 작업 전 최신화
   return dir;
+}
+
+export async function getVaultRemoteRevision(): Promise<string> {
+  const ref = `refs/heads/${VAULT_PROJECT.defaultBranch}`;
+  try {
+    const { stdout } = await promisify(execFile)(
+      "git", ["ls-remote", "--exit-code", "--", VAULT_PROJECT.repoUrl, ref],
+      { env: githubAuthEnv(), timeout: 10_000 },
+    );
+    const [revision, receivedRef] = stdout.trim().split("\t");
+    if (receivedRef === ref && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(revision)) return revision;
+  } catch {
+    // Git stderr and argv can expose credentials or the private remote URL.
+  }
+  throw new Error("vault remote revision unavailable");
 }

@@ -54,6 +54,25 @@ describe("content worker queue isolation", () => {
     rmSync(mocks.env.WORK_DIR, { recursive: true, force: true });
   });
 
+  it("resumes an external request by ID and counts only actual generation attempts", async () => {
+    vi.stubEnv("CONTENT_EXECUTOR", "worker");
+    const job = create("queued", "available");
+    const fetch = vi.fn().mockResolvedValue({ isSendable: () => true, send: vi.fn().mockResolvedValue({ id: "review" }) });
+    await start(fetch);
+    const request = jobs.get(job.id).execution!;
+    expect(request.action).toBe("generate");
+    jobs.recover();
+    writeFileSync(join(jobs.path(job.id), "execution-result.json"), JSON.stringify({ id: "previous", code: 0 }));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(jobs.get(job.id)).toMatchObject({ state: "generating", generationAttempts: 1, execution: request });
+    writeFileSync(join(jobs.path(job.id), "draft.json"), JSON.stringify({}));
+    writeFileSync(join(jobs.path(job.id), "execution-result.json"), JSON.stringify({ id: request.id, code: 0 }));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(jobs.get(job.id)).toMatchObject({ state: "draft", message: "review", generationAttempts: 1 });
+    expect(jobs.get(job.id).execution).toBeUndefined();
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
   it("does not fetch channels for rejected, notified, or already presented jobs", async () => {
     create("rejected", "deleted");
     create("review", "deleted", "review-message");

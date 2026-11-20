@@ -14,17 +14,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check bot and watchdog health
+      - name: Check bot, watchdog and Mac probe health
         env:
           WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
         run: |
           for attempt in 1 2 3; do
             code=$(curl -s -o healthz.json -w '%{http_code}' --max-time 20 https://alerts.todari.dev/healthz || true)
-            [ "$code" = "200" ] && exit 0
-            sleep 40
+            probe=$(jq -r '.macProbe.status // "unknown"' healthz.json 2>/dev/null || true)
+            bot_ok=false
+            if [ "$code" = "200" ] && jq -es 'length == 1 and (.[0] | type == "object" and .ok == true)' healthz.json >/dev/null 2>&1; then
+              bot_ok=true
+              [ "$probe" = "stale" ] || exit 0
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then sleep 40; fi
           done
           stale=$(jq -r '[.checks | to_entries[] | select(.value.status != "healthy") | "\(.key)=\(.value.status)"] | join(", ")' healthz.json 2>/dev/null || true)
           MSG="@everyone 🔴 todari-ops 상태 확인 실패 (HTTP ${code:-없음}) — ${stale:-봇이 응답하지 않습니다}. 봇 또는 인스타 워치독이 멈췄을 수 있습니다."
+          if [ "$bot_ok" = "true" ] && [ "$probe" = "stale" ]; then
+            MSG="@everyone 🟡 Mac mini 운영 프로브의 최근 점검 기록을 확인할 수 없습니다."
+          fi
           [ -z "$WEBHOOK" ] && { echo "$MSG"; exit 1; }
           curl -sS -H "Content-Type: application/json" \
             -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:["everyone"]}}')" "$WEBHOOK" >/dev/null || true

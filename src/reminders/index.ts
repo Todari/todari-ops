@@ -1,10 +1,8 @@
-import { ChannelType } from "discord.js";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { env } from "../env.js";
 import { getDiscordClient } from "../discord/client.js";
+import { readJsonFile, writeJsonFile } from "../storage/json-file.js";
 
 // /remind 30m|2h|1d|HH:MM <내용> — 일회성 리마인더. /data 볼륨의 JSON 에
 // 영속화해 재시작에도 살아남고, 발화 시 커맨드를 친 채널에 멘션으로 알린다.
@@ -18,23 +16,21 @@ interface Reminder {
 
 const FILE = path.resolve(env.WORK_DIR, "..", "reminders.json");
 const MAX_DELAY_MS = 20 * 86_400_000;
+const RETRY_MS = 60_000;
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
-let reminders: Reminder[] = [];
-
 export function startReminders(): void {
+  let reminders: Reminder[];
   try {
-    reminders = existsSync(FILE)
-      ? (JSON.parse(readFileSync(FILE, "utf8")) as Reminder[])
-      : [];
-    if (!Array.isArray(reminders)) reminders = [];
-  } catch {
-    reminders = [];
+    reminders = load();
+  } catch (err) {
+    console.warn("[remind] restore failed:", err);
+    setTimeout(startReminders, RETRY_MS).unref();
+    return;
   }
   const now = Date.now();
   const overdue = reminders.filter((r) => r.fireAt <= now);
-  for (const r of overdue) void fire(r, true);
-  for (const r of reminders.filter((x) => x.fireAt > now)) schedule(r);
+  for (const reminder of reminders) schedule(reminder, reminder.fireAt <= now);
   if (reminders.length > 0) {
     console.log(`[remind] restored ${reminders.length} reminders (${overdue.length} overdue)`);
   }
@@ -70,45 +66,57 @@ export async function addReminder(args: {
   content: string;
   fireAt: number;
 }): Promise<Reminder> {
-  const reminder: Reminder = { id: randomUUID().slice(0, 8), ...args };
-  reminders.push(reminder);
-  await persist();
+  const reminder: Reminder = { id: randomUUID(), ...args };
+  writeJsonFile(FILE, [...load(), reminder]);
   schedule(reminder);
   return reminder;
 }
 
-function schedule(r: Reminder): void {
-  const delay = Math.max(0, r.fireAt - Date.now());
-  timers.set(
-    r.id,
-    setTimeout(() => void fire(r, false), delay),
-  );
+function schedule(r: Reminder, late = false, delay = r.fireAt - Date.now(), sent = false): void {
+  const prior = timers.get(r.id);
+  if (prior) clearTimeout(prior);
+  const timer = setTimeout(() => void fire(r, late, sent), Math.max(0, delay));
+  timer.unref();
+  timers.set(r.id, timer);
 }
 
-async function fire(r: Reminder, late: boolean): Promise<void> {
+async function fire(r: Reminder, late: boolean, sent: boolean): Promise<void> {
   try {
-    const client = getDiscordClient();
-    const ch = await client.channels.fetch(r.channelId).catch(() => null);
-    if (ch && (ch.type === ChannelType.GuildText || ch.isThread())) {
+    if (!sent) {
+      const ch = await getDiscordClient().channels.fetch(r.channelId);
+      if (!ch?.isSendable()) {
+        throw new Error("Reminder channel unavailable");
+      }
       const lateNote = late ? " (봇 재시작으로 지연됨)" : "";
-      await ch.send(`⏰ <@${env.OWNER_DISCORD_ID}> ${r.content}${lateNote}`);
+      const prefix = `⏰ <@${env.OWNER_DISCORD_ID}>`;
+      const content = `${prefix} ${r.content}${lateNote}`;
+      await ch.send({
+        content: content.length <= 2000 ? content : `${prefix} 리마인더가 도착했어요.${lateNote}`,
+        ...(content.length > 2000 && { files: [{ attachment: Buffer.from(r.content), name: "reminder.txt" }] }),
+        allowedMentions: { users: [env.OWNER_DISCORD_ID] },
+        nonce: r.id.slice(0, 25),
+        enforceNonce: true,
+      });
+      sent = true;
     }
-  } catch (err) {
-    console.warn("[remind] fire failed:", err);
-  } finally {
+    writeJsonFile(FILE, load().filter((item) => item.id !== r.id));
     timers.delete(r.id);
-    reminders = reminders.filter((x) => x.id !== r.id);
-    await persist();
+  } catch (err) {
+    console.warn("[remind] delivery pending:", r.id, (err as Error).name);
+    schedule(r, late, RETRY_MS, sent);
   }
 }
 
-async function persist(): Promise<void> {
-  try {
-    await mkdir(path.dirname(FILE), { recursive: true });
-    const tmp = FILE + ".tmp";
-    await writeFile(tmp, JSON.stringify(reminders, null, 2));
-    await rename(tmp, FILE);
-  } catch (err) {
-    console.warn("[remind] persist failed:", err);
+function load(): Reminder[] {
+  const reminders = readJsonFile(FILE, []);
+  if (!Array.isArray(reminders) || !reminders.every(isReminder)) {
+    throw new Error("Invalid reminder store");
   }
+  return reminders;
+}
+
+function isReminder(value: unknown): value is Reminder {
+  const reminder = value as Partial<Reminder> | null;
+  return typeof reminder?.id === "string" && typeof reminder.channelId === "string"
+    && typeof reminder.content === "string" && Number.isFinite(reminder.fireAt);
 }
